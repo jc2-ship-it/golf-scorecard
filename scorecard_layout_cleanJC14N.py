@@ -2,6 +2,9 @@ import pandas as pd
 import streamlit as st
 import datetime
 import altair as alt
+import os, json, random
+from pathlib import Path
+
 
 
 # Load CSV
@@ -189,6 +192,15 @@ for i, (label, row) in enumerate(stat_rows):
             table_html += f"<td style='padding:4px; text-align:center; {style}'>{val}</td>"
     table_html += "</tr>"
 table_html += "</tbody></table></div>"
+# Make the table header sticky while scrolling
+st.markdown("""
+<style>
+table thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: #444 !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 st.markdown(table_html, unsafe_allow_html=True)
 
@@ -443,6 +455,81 @@ Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_di
 """
 
 st.markdown(summary_html, unsafe_allow_html=True)
+# Compact stat cards row
+cards_html = f"""
+<div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">Score</div>
+    <div style="font-size:22px;font-weight:700;">{total_score} <span style="font-size:14px;color:#bbb;">({score_to_par_str})</span></div>
+  </div>
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">Putts / Hole</div>
+    <div style="font-size:22px;font-weight:700;">{putts_per_hole:.2f}</div>
+  </div>
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">GIR</div>
+    <div style="font-size:22px;font-weight:700;">{gir_total}/{holes_played} <span style="font-size:14px;color:#bbb;">({gir_pct:.1f}%)</span></div>
+  </div>
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">Fairways</div>
+    <div style="font-size:22px;font-weight:700;">{fw_total}/{fw_attempts} <span style="font-size:14px;color:#bbb;">({fw_pct:.1f}%)</span></div>
+  </div>
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">Scrambles</div>
+    <div style="font-size:22px;font-weight:700;">{scrambles_display}</div>
+  </div>
+  <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
+    <div style="font-size:12px;color:#aaa;">Up & Downs</div>
+    <div style="font-size:22px;font-weight:700;">{updowns_display}</div>
+  </div>
+</div>
+"""
+st.markdown(cards_html, unsafe_allow_html=True)
+# --- Callouts: Best/Worst hole & longest Par-or-Better streak ---
+_delta = pd.to_numeric(round_data["Hole Score"], errors="coerce") - pd.to_numeric(round_data["Par"], errors="coerce")
+_holes = round_data["Hole"].astype(int)
+_labels = round_data.get("Score Label", pd.Series([""] * len(round_data), index=round_data.index))
+
+def _fmt_delta(n: float) -> str:
+    n = int(n)
+    return "E" if n == 0 else (f"+{n}" if n > 0 else f"{n}")
+
+# Best (lowest to par) & worst (highest to par)
+best_idx = _delta.idxmin()
+worst_idx = _delta.idxmax()
+best_hole_num  = int(round_data.loc[best_idx, "Hole"])
+best_delta_str = _fmt_delta(_delta.loc[best_idx])
+best_label     = str(_labels.loc[best_idx])
+
+worst_hole_num  = int(round_data.loc[worst_idx, "Hole"])
+worst_delta_str = _fmt_delta(_delta.loc[worst_idx])
+worst_label     = str(_labels.loc[worst_idx])
+
+# Longest Par-or-Better streak (score <= par), reported as Hstart–Hend
+par_or_better = (_delta <= 0).tolist()
+hole_seq = _holes.tolist()
+
+max_len = cur_len = 0
+best_start = best_end = cur_start = None
+for ok, h in zip(par_or_better, hole_seq):
+    if ok:
+        cur_len += 1
+        if cur_len == 1:
+            cur_start = h
+        if cur_len > max_len:
+            max_len, best_start, best_end = cur_len, cur_start, h
+    else:
+        cur_len = 0
+streak_text = f"{max_len} holes (H{best_start}–H{best_end})" if max_len else "—"
+
+callouts_html = f"""
+<div style="margin-top:8px; padding:10px 12px; background:#2a2a2a; border-radius:10px; line-height:1.6;">
+  <b>⭐ Best Hole:</b> H{best_hole_num} ({best_delta_str}) — {best_label}<br>
+  <b>⚠️ Worst Hole:</b> H{worst_hole_num} ({worst_delta_str}) — {worst_label}<br>
+  <b>🔗 Longest Par-or-Better Streak:</b> {streak_text}
+</div>
+"""
+st.markdown(callouts_html, unsafe_allow_html=True)
 
 import random, json, os
 from pathlib import Path
@@ -525,6 +612,45 @@ counts_line = " • ".join(
     f"{row.Category}: {row.Count} ({row.Percent:.1f}%)" for _, row in df_mix.iterrows()
 )
 st.caption(counts_line)
+# ---- Hole-by-hole (Score vs Par) sparkline (integer ticks only) ----
+st.markdown("#### Hole-by-Hole (Score vs Par)")
+df_line = pd.DataFrame({
+    "Hole": round_data["Hole"].astype(int),
+    "Delta": (pd.to_numeric(round_data["Hole Score"], errors="coerce")
+              - pd.to_numeric(round_data["Par"], errors="coerce")).astype(int)
+}).sort_values("Hole")
+
+# Build integer tick marks
+delta_min = int(df_line["Delta"].min())
+delta_max = int(df_line["Delta"].max())
+if delta_min == delta_max:   # avoid a single-tick axis
+    delta_min -= 1
+    delta_max += 1
+tick_vals = list(range(delta_min, delta_max + 1))
+
+# Zero reference line
+zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(opacity=0.4).encode(y="y:Q")
+
+# Line + points, with integer-only y-axis
+line = alt.Chart(df_line).mark_line().encode(
+    x=alt.X("Hole:O", sort=None, axis=alt.Axis(title=None)),
+    y=alt.Y(
+        "Delta:Q",
+        scale=alt.Scale(domain=[delta_min, delta_max], nice=False, clamp=True),
+        axis=alt.Axis(title="To Par", values=tick_vals, format="d", tickCount=len(tick_vals))
+    )
+)
+
+pts = alt.Chart(df_line).mark_point(size=70).encode(
+    x="Hole:O",
+    y="Delta:Q",
+    color=alt.condition("datum.Delta <= 0", alt.value("#64dfb5"), alt.value("#ee6c4d")),
+    tooltip=[alt.Tooltip("Hole:O"), alt.Tooltip("Delta:Q", title="To Par", format="d")]
+)
+
+st.altair_chart(zero + line + pts, use_container_width=True)
+
+
 
 # --- Random Fun Fact (auto only) ---
 def load_fun_facts():
