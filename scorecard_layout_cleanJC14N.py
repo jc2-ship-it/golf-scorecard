@@ -1,6 +1,8 @@
 import pandas as pd
 import streamlit as st
 import datetime
+import altair as alt
+
 
 # Load CSV
 df = pd.read_csv("Hole Data-Grid view (18).csv")
@@ -129,6 +131,12 @@ total_1_putts = (round_data["Putts"] == 1).sum()
 total_3_plus_putts = (round_data["Putts"] >= 3).sum()
 total_3_putt_bogeys = round_data["3 Putt Bogey"].sum() if "3 Putt Bogey" in round_data else 0
 
+# Quote
+st.markdown(
+    "🏌️ *“Arnie steps to the tee with precision in mind. Seve follows, carving creativity from the rough.”*",
+    unsafe_allow_html=True
+)
+
 # Scorecard Table
 table_html = f"""
 <div style="background:#333; padding:12px; border-radius:10px;">
@@ -195,12 +203,19 @@ total_scrambles = round_data["Scramble"].sum() if "Scramble" in round_data else 
 total_scramble_ops = round_data["Scramble Opportunity"].sum() if "Scramble Opportunity" in round_data else 0
 scramble_pct = f"{round(100 * total_scrambles / total_scramble_ops, 1)}%" if total_scramble_ops else "-"
 
-total_updowns = round_data["Up & Down"].sum() if "Up & Down" in round_data else 0
-total_updown_ops = round_data["Up & Down Opportunity"].sum() if "Up & Down Opportunity" in round_data else 0
-updown_pct = f"{round(100 * total_updowns / total_updown_ops, 1)}%" if total_updown_ops else "-"
+# Up & Downs: no GIR + 1 putt; opportunities = Scramble Opportunity
+_gir   = pd.to_numeric(round_data.get("GIR", 0),   errors="coerce").fillna(0).astype(int)
+_putts = pd.to_numeric(round_data.get("Putts", 0), errors="coerce").fillna(0).astype(int)
+
+total_updowns     = int(((_gir == 0) & (_putts == 1)).sum())
+total_updown_ops  = int(pd.to_numeric(round_data.get("Scramble Opportunity", 0), errors="coerce").fillna(0).sum())
+updown_pct        = f"{(100*total_updowns/total_updown_ops):.1f}%" if total_updown_ops else "-"
 
 # Lost Balls
-lost_balls_total = sum(lost_balls)
+lost_ball_tee = pd.to_numeric(round_data["Lost Ball Tee Shot Quantity"], errors="coerce").fillna(0).astype(int).sum()
+lost_ball_appr = pd.to_numeric(round_data["Lost Ball Approach Shot Quantity"], errors="coerce").fillna(0).astype(int).sum()
+total_lost_balls = int(lost_ball_tee + lost_ball_appr)
+lost_balls_display = f"Tee {lost_ball_tee} / Approach {lost_ball_appr} / Total {total_lost_balls}"
 
 # Score Type Breakdown
 score_types = round_data["Score Label"].value_counts().to_dict()
@@ -307,6 +322,25 @@ fw_par5_made = round_data[(round_data["Par"] == 5) & (round_data["Fairway"] == 1
 fw_par5_total = round_data[round_data["Par"] == 5]["Fairway"].count()
 fw_par5_pct = (fw_par5_made / fw_par5_total) * 100 if fw_par5_total > 0 else 0
 
+# --- GIR & Fairway: made/total/% by par (for display like 0/4 0.0%) ---
+def _made_total_pct_by_par(df, metric_col, par_value):
+    if metric_col not in df or "Par" not in df:
+        return 0, 0, 0.0
+    block = df[df["Par"] == par_value]
+    total = int(block.shape[0])
+    made = int(pd.to_numeric(block[metric_col], errors="coerce").fillna(0).sum())
+    pct = (made / total * 100.0) if total else 0.0
+    return made, total, pct
+
+# GIR by Par 3/4/5
+gir3_m, gir3_t, gir3_pct = _made_total_pct_by_par(round_data, "GIR", 3)
+gir4_m, gir4_t, gir4_pct = _made_total_pct_by_par(round_data, "GIR", 4)
+gir5_m, gir5_t, gir5_pct = _made_total_pct_by_par(round_data, "GIR", 5)
+
+# Fairways by Par 4/5
+fw4_m, fw4_t, fw4_pct = _made_total_pct_by_par(round_data, "Fairway", 4)
+fw5_m, fw5_t, fw5_pct = _made_total_pct_by_par(round_data, "Fairway", 5)
+
 # Seves and Hole Outs
 seves_total = round_data["Seve"].sum() if "Seve" in round_data else 0
 hole_outs_total = round_data["Hole Out"].sum() if "Hole Out" in round_data else 0
@@ -329,26 +363,60 @@ def get_emoji(pct):
         return "❄️"
     else:
         return ""
-# Fairway total, attempts, and percentage
-fw_total = round_data["Fairway"].sum() if "Fairway" in round_data else 0
-fw_attempts = round_data["Fairway"].count() if "Fairway" in round_data else 0
-fw_pct = (fw_total / fw_attempts * 100) if fw_attempts > 0 else 0
+# Fairway total, attempts, and percentage (Par 4 & 5 only)
+if "Fairway" in round_data:
+    _fw_series = pd.to_numeric(
+        round_data.loc[round_data["Par"].isin([4, 5]), "Fairway"],
+        errors="coerce"
+    ).fillna(0)
+    fw_total = int(_fw_series.sum())
+    fw_attempts = int(_fw_series.count())   # only P4/P5 holes
+    fw_pct = (fw_total / fw_attempts * 100) if fw_attempts else 0
+else:
+    fw_total = 0
+    fw_attempts = 0
+    fw_pct = 0
+
 # GIR total and percentage
 gir_total = round_data["GIR"].sum() if "GIR" in round_data else 0
 holes_played = round_data.shape[0]
 gir_pct = (gir_total / holes_played * 100) if holes_played > 0 else 0
-arnies_total = round_data["Arnie"].sum() if "Arnie" in round_data else 0
+arnies_total = round_data["Arnie"].sum() if "Arnie" in round_data else 0# --- score-to-par + putts/hole helpers ---
+if "Score to Par" in round_data:
+    _stp = pd.to_numeric(round_data["Score to Par"], errors="coerce").fillna(0)
+    score_to_par_total = int(_stp.sum())
+else:
+    score_to_par_total = int(total_score - sum(pars))
+
+def _fmt_to_par(n: int) -> str:
+    return "E" if n == 0 else f"{'+' if n > 0 else ''}{n}"
+
+score_to_par_str = _fmt_to_par(score_to_par_total)
+putts_per_hole = (total_putts / holes_played) if holes_played else 0.0
+# -- Scrambles / Up & Downs display strings --
+if total_scramble_ops:
+    scrambles_display = f"{int(total_scrambles)}/{int(total_scramble_ops)} ({(total_scrambles/total_scramble_ops*100):.1f}%)"
+else:
+    scrambles_display = "0/0 (-)"
+
+if total_updown_ops:
+    updowns_display = f"{int(total_updowns)}/{int(total_updown_ops)} ({(total_updowns/total_updown_ops*100):.1f}%)"
+else:
+    updowns_display = "0/0 (-)"
+
+
 
 
 summary_html = f"""
 🏌️ {player} | {course} | {date}<br><br>
 
-<b>📊 Round Totals</b><br>
-Score: {total_score}<br>
-Putts: {total_putts}<br>
+<b>📊 Round Totals — {holes_played} Holes</b><br>
+Score: {total_score} ({score_to_par_str})<br>
+Putts: {total_putts} ({putts_per_hole:.2f} Per Hole)<br>
 Fairways: {fw_total}/{fw_attempts} ({fw_pct:.1f}%)<br>
 GIR: {gir_total}/{holes_played} ({gir_pct:.1f}%)<br>
 Arnies: {arnies_total}<br><br>
+
 
 <b>📈 Scoring Averages</b><br>
 Par 3 Avg: {par3_avg:.1f}<br>
@@ -366,11 +434,138 @@ Total 1 Putts: {one_putts}<br>
 Total 3+ Putts: {three_plus_putts}<br>
 3-Putt Bogeys: {three_putt_bogeys}<br>
 Pro Pars+: {pro_pars_total}<br>
-GIR% — Par 3: {gir_par3_pct:.1f}% {get_emoji(gir_par3_pct)} | Par 4: {gir_par4_pct:.1f}% {get_emoji(gir_par4_pct)} | Par 5: {gir_par5_pct:.1f}% {get_emoji(gir_par5_pct)}<br>
-FW% — Par 4: {fw_par4_pct:.1f}% {get_emoji(fw_par4_pct)} | Par 5: {fw_par5_pct:.1f}% {get_emoji(fw_par5_pct)}<br>
+Scrambles: {scrambles_display}<br>
+Up & Downs: {updowns_display}<br>
+GIR — Par 3: {gir3_m}/{gir3_t} {gir3_pct:.1f}% {get_emoji(gir3_pct)} | Par 4: {gir4_m}/{gir4_t} {gir4_pct:.1f}% {get_emoji(gir4_pct)} | Par 5: {gir5_m}/{gir5_t} {gir5_pct:.1f}% {get_emoji(gir5_pct)}<br>
+Fairways — Par 4: {fw4_m}/{fw4_t} {fw4_pct:.1f}% {get_emoji(fw4_pct)} | Par 5: {fw5_m}/{fw5_t} {fw5_pct:.1f}% {get_emoji(fw5_pct)}<br>
 GIR Overall: {gir_pct:.1f}% {get_emoji(gir_pct)}<br>
-Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {total_lost_balls}
+Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}
 """
 
 st.markdown(summary_html, unsafe_allow_html=True)
 
+import random, json, os
+from pathlib import Path
+
+# ---- Visuals (one long progress bar with on-bar labels) ----
+st.divider()
+st.markdown("### 📊 Score Mix")
+
+# Order & counts (use your existing score_type_counts)
+order = ["Eagle", "Birdie", "Par", "Bogey", "Double Bogey", "Triple Bogey +"]
+counts = [int(score_type_counts.get(k, 0)) for k in order]
+total = sum(counts) or 1
+
+df_mix = pd.DataFrame({
+    "Category": order,
+    "Count": counts,
+    "Percent": [c / total * 100 for c in counts],
+    "Group": ["All Holes"] * len(order)  # single bar
+})
+
+# Hide zero-width segments in the chart layer
+df_plot = df_mix[df_mix["Count"] > 0].copy()
+if df_plot.empty:
+    df_plot = df_mix.copy()
+
+# Color palette (tweak if you like)
+color_scale = alt.Scale(
+    domain=order,
+    range=["#71c7ec", "#64dfb5", "#bdbdbd", "#f2c14e", "#ee6c4d", "#b23a48"]
+)
+
+# Build a base with stacked positions so we can center labels per segment
+base = (
+    alt.Chart(df_plot)
+    # round Percent to 1 decimal for labels
+    .transform_calculate(pct='round(datum.Percent * 10) / 10')
+    # compute start/end of each stacked segment
+    .transform_stack(stack='Count', as_=['start', 'end'], groupby=['Group'])
+    # mid-point for label placement
+    .transform_calculate(mid='(datum.start + datum.end) / 2')
+)
+
+# Bar segments (full-width normalized stack)
+bar = (
+    base.mark_bar(height=38)
+    .encode(
+        y=alt.Y("Group:N", title=None, axis=alt.Axis(labels=False, ticks=False)),
+        x=alt.X("end:Q", stack=None, axis=None),
+        x2="start:Q",
+        color=alt.Color("Category:N", scale=color_scale, legend=alt.Legend(orient="bottom")),
+        tooltip=[
+            alt.Tooltip("Category:N"),
+            alt.Tooltip("Count:Q", title="Holes"),
+            alt.Tooltip("pct:Q", title="% of Round", format=".1f"),
+        ],
+    )
+)
+
+# Text labels centered in each segment: "Category 12.5%"
+text = (
+    base.mark_text(baseline="middle", dy=0, fontWeight="bold")
+    .encode(
+        y="Group:N",
+        x="mid:Q",
+        text=alt.Text("label:N"),
+        # Only show label if the segment is at least ~8% wide (prevents overlap)
+        opacity=alt.condition("datum.Percent < 8", alt.value(0), alt.value(1))
+    )
+    # Build the label string on the fly: Category + space + pct + '%'
+    .transform_calculate(label='datum.Category + " " + (format(datum.pct, ".1f")) + "%"')
+)
+
+st.altair_chart(
+    (bar + text).configure_view(stroke=None).configure_axis(grid=False, domain=False),
+    use_container_width=True,
+)
+
+# A small line under the bar with exact numbers for reference/printing
+counts_line = " • ".join(
+    f"{row.Category}: {row.Count} ({row.Percent:.1f}%)" for _, row in df_mix.iterrows()
+)
+st.caption(counts_line)
+
+# --- Random Fun Fact (auto only) ---
+def load_fun_facts():
+    json_path = Path(__file__).parent / "fun_facts.json"
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return [fact for facts in data.values() for fact in facts]
+    # fallback
+    return [
+        "Golf balls were once made of wood.",
+        "The term 'birdie' originated at Atlantic City Country Club in 1903."
+    ]
+
+all_facts = load_fun_facts()
+random_fact = random.choice(all_facts)
+
+st.markdown(
+    f"<br><b>💡 Fun Fact:</b> {random_fact}",
+    unsafe_allow_html=True
+)
+# ---- Download this round (HTML) ----
+download_html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{player} — {course} — {date}</title>
+</head>
+<body style="background:#1e1e1e;color:#eaeaea;font-family:Segoe UI, Roboto, Arial,sans-serif;">
+<h2>{player} &middot; {course} &middot; {date}</h2>
+{table_html}
+<div style="margin-top:16px">{summary_html}</div>
+</body>
+</html>
+""".strip()
+
+st.download_button(
+    "⬇️ Download Round (HTML)",
+    data=download_html.encode("utf-8"),
+    file_name=f"{player}_{course}_{date.replace(',', '')}_scorecard.html".replace(" ", "_"),
+    mime="text/html"
+)
