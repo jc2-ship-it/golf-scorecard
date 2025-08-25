@@ -416,46 +416,12 @@ if total_updown_ops:
 else:
     updowns_display = "0/0 (-)"
 
-
-
-
-summary_html = f"""
+# --- Header (round info), Bubble cards, and Details (text blocks) ---
+summary_header_html = f"""
 🏌️ {player} | {course} | {date}<br><br>
-
-<b>📊 Round Totals — {holes_played} Holes</b><br>
-Score: {total_score} ({score_to_par_str})<br>
-Putts: {total_putts} ({putts_per_hole:.2f} Per Hole)<br>
-Fairways: {fw_total}/{fw_attempts} ({fw_pct:.1f}%)<br>
-GIR: {gir_total}/{holes_played} ({gir_pct:.1f}%)<br>
-Arnies: {arnies_total}<br><br>
-
-
-<b>📈 Scoring Averages</b><br>
-Par 3 Avg: {par3_avg:.1f}<br>
-Par 4 Avg: {par4_avg:.1f}<br>
-Par 5 Avg: {par5_avg:.1f}<br><br>
-
-<b>🎯 Score Breakdown</b><br>
-Birdie: {score_type_counts.get("Birdie", 0)} | Par: {score_type_counts.get("Par", 0)} | Bogey: {score_type_counts.get("Bogey", 0)} | Double Bogey: {score_type_counts.get("Double Bogey", 0)} | Triple Bogey +: {score_type_counts.get("Triple Bogey +", 0)}<br>
-Par or Better: {cat_counts.get("Par or Better", 0)} ({round(cat_counts.get("Par or Better", 0)/total_holes*100,1)}%) |
-Bogey: {cat_counts.get("Bogey", 0)} ({round(cat_counts.get("Bogey", 0)/total_holes*100,1)}%) |
-Double+: {cat_counts.get("Double+", 0)} ({round(cat_counts.get("Double+", 0)/total_holes*100,1)}%)<br><br>
-
-<b>💡 Advanced Insights</b><br>
-Total 1 Putts: {one_putts}<br>
-Total 3+ Putts: {three_plus_putts}<br>
-3-Putt Bogeys: {three_putt_bogeys}<br>
-Pro Pars+: {pro_pars_total}<br>
-Scrambles: {scrambles_display}<br>
-Up & Downs: {updowns_display}<br>
-GIR — Par 3: {gir3_m}/{gir3_t} {gir3_pct:.1f}% {get_emoji(gir3_pct)} | Par 4: {gir4_m}/{gir4_t} {gir4_pct:.1f}% {get_emoji(gir4_pct)} | Par 5: {gir5_m}/{gir5_t} {gir5_pct:.1f}% {get_emoji(gir5_pct)}<br>
-Fairways — Par 4: {fw4_m}/{fw4_t} {fw4_pct:.1f}% {get_emoji(fw4_pct)} | Par 5: {fw5_m}/{fw5_t} {fw5_pct:.1f}% {get_emoji(fw5_pct)}<br>
-GIR Overall: {gir_pct:.1f}% {get_emoji(gir_pct)}<br>
-Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}
+<b>📊 Round Totals — {holes_played} Holes</b>
 """
 
-st.markdown(summary_html, unsafe_allow_html=True)
-# Compact stat cards row
 cards_html = f"""
 <div style="display:flex; gap:12px; flex-wrap:wrap; margin:8px 0 4px 0;">
   <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:12px;">
@@ -484,7 +450,42 @@ cards_html = f"""
   </div>
 </div>
 """
+
+summary_details_html = f"""
+<br>
+
+<b>📈 Scoring Averages</b><br>
+Par 3 Avg: {par3_avg:.1f}<br>
+Par 4 Avg: {par4_avg:.1f}<br>
+Par 5 Avg: {par5_avg:.1f}<br><br>
+
+<b>🎯 Score Breakdown</b><br>
+Birdie: {score_type_counts.get("Birdie", 0)} | Par: {score_type_counts.get("Par", 0)} | Bogey: {score_type_counts.get("Bogey", 0)} | Double Bogey: {score_type_counts.get("Double Bogey", 0)} | Triple Bogey +: {score_type_counts.get("Triple Bogey +", 0)}<br>
+Par or Better: {cat_counts.get("Par or Better", 0)} ({round(cat_counts.get("Par or Better", 0)/total_holes*100,1)}%) |
+Bogey: {cat_counts.get("Bogey", 0)} ({round(cat_counts.get("Bogey", 0)/total_holes*100,1)}%) |
+Double+: {cat_counts.get("Double+", 0)} ({round(cat_counts.get("Double+", 0)/total_holes*100,1)}%)<br><br>
+
+<b>💡 Advanced Insights</b><br>
+Total 1 Putts: {one_putts}<br>
+Total 3+ Putts: {three_plus_putts}<br>
+3-Putt Bogeys: {three_putt_bogeys}<br>
+Pro Pars+: {pro_pars_total}<br>
+Scrambles: {scrambles_display}<br>
+Up & Downs: {updowns_display}<br>
+GIR — Par 3: {gir3_m}/{gir3_t} {gir3_pct:.1f}% {get_emoji(gir3_pct)} | Par 4: {gir4_m}/{gir4_t} {gir4_pct:.1f}% {get_emoji(gir4_pct)} | Par 5: {gir5_m}/{gir5_t} {gir5_pct:.1f}% {get_emoji(gir5_pct)}<br>
+Fairways — Par 4: {fw4_m}/{fw4_t} {fw4_pct:.1f}% {get_emoji(fw4_pct)} | Par 5: {fw5_m}/{fw5_t} {fw5_pct:.1f}% {get_emoji(fw5_pct)}<br>
+GIR Overall: {gir_pct:.1f}% {get_emoji(gir_pct)}<br>
+Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}
+"""
+
+# Render header + bubbles right under the scorecard (before visuals)
+st.markdown(summary_header_html, unsafe_allow_html=True)
 st.markdown(cards_html, unsafe_allow_html=True)
+
+
+
+
+# Compact stat cards row
 # --- Callouts: Best/Worst hole & longest Par-or-Better streak ---
 _delta = pd.to_numeric(round_data["Hole Score"], errors="coerce") - pd.to_numeric(round_data["Par"], errors="coerce")
 _holes = round_data["Hole"].astype(int)
@@ -612,6 +613,7 @@ counts_line = " • ".join(
     f"{row.Category}: {row.Count} ({row.Percent:.1f}%)" for _, row in df_mix.iterrows()
 )
 st.caption(counts_line)
+st.markdown(summary_details_html, unsafe_allow_html=True)
 # ---- Hole-by-hole (Score vs Par) sparkline (integer ticks only) ----
 st.markdown("#### Hole-by-Hole (Score vs Par)")
 df_line = pd.DataFrame({
@@ -684,10 +686,15 @@ download_html = f"""
 <body style="background:#1e1e1e;color:#eaeaea;font-family:Segoe UI, Roboto, Arial,sans-serif;">
 <h2>{player} &middot; {course} &middot; {date}</h2>
 {table_html}
-<div style="margin-top:16px">{summary_html}</div>
+<div style="margin-top:16px">
+  {summary_header_html}
+  {cards_html}
+  {summary_details_html}
+</div>
 </body>
 </html>
 """.strip()
+
 
 st.download_button(
     "⬇️ Download Round (HTML)",
