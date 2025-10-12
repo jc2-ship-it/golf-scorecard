@@ -481,6 +481,127 @@ Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_di
 # Render header + bubbles right under the scorecard (before visuals)
 st.markdown(summary_header_html, unsafe_allow_html=True)
 st.markdown(cards_html, unsafe_allow_html=True)
+# ---- Comparison: current round vs prev 5 rounds & last 100 holes (player history) ----
+try:
+    # Work off the full dataset for the selected player, excluding the current round for comparisons
+    _player_all = df[df["Player Name"] == player].copy()
+    _player_hist = _player_all[_player_all["Round Link"] != selected_round].copy()
+
+    # Ensure types
+    _player_hist["Date Played"] = pd.to_datetime(_player_hist["Date Played"], errors="coerce")
+    _player_hist["Par"] = pd.to_numeric(_player_hist["Par"], errors="coerce")
+    _player_hist["Hole Score"] = pd.to_numeric(_player_hist["Hole Score"], errors="coerce")
+    _player_hist["Putts"] = pd.to_numeric(_player_hist["Putts"], errors="coerce")
+    _player_hist["GIR"] = pd.to_numeric(_player_hist["GIR"], errors="coerce")
+    _player_hist["Fairway"] = pd.to_numeric(_player_hist["Fairway"], errors="coerce")
+
+    # If no history, skip quietly
+    if not _player_hist.empty:
+        # ---- Last 5 rounds window
+        _round_order = (
+            _player_hist[["Round Link", "Date Played"]]
+            .dropna()
+            .drop_duplicates()
+            .sort_values("Date Played")
+        )
+        _last5_links = _round_order["Round Link"].tail(5).tolist()
+        _last5 = _player_hist[_player_hist["Round Link"].isin(_last5_links)].copy()
+
+        # ---- Last 100 holes window
+        _hist_sorted = _player_hist.sort_values(["Date Played", "Round Link", "Hole"])
+        _last100 = _hist_sorted.tail(100).copy()
+
+        def _fw_pct(df_block):
+            # Fairway % only on Par 4 & 5 attempts
+            _block = df_block[df_block["Par"].isin([4, 5])]
+            if _block.empty:
+                return 0.0
+            return float((_block["Fairway"].fillna(0).astype(float).mean()) * 100.0)
+
+        def _gir_pct(df_block):
+            if df_block.empty:
+                return 0.0
+            return float((df_block["GIR"].fillna(0).astype(float).mean()) * 100.0)
+
+        def _putts_per_hole(df_block):
+            if df_block.empty:
+                return 0.0
+            return float(df_block["Putts"].fillna(0).astype(float).mean())
+
+        # History metrics
+        p5_putts = _putts_per_hole(_last5) if not _last5.empty else None
+        p5_gir   = _gir_pct(_last5)        if not _last5.empty else None
+        p5_fw    = _fw_pct(_last5)         if not _last5.empty else None
+
+        h100_putts = _putts_per_hole(_last100) if not _last100.empty else None
+        h100_gir   = _gir_pct(_last100)        if not _last100.empty else None
+        h100_fw    = _fw_pct(_last100)         if not _last100.empty else None
+
+        # Current round metrics (already computed above)
+        cur_putts = float(putts_per_hole) if holes_played else 0.0
+        cur_gir   = float(gir_pct)
+        cur_fw    = float(fw_pct)
+
+        def _delta_emoji(diff, higher_is_better=True):
+            # For putts (lower is better), invert the sense
+            if higher_is_better:
+                return "🔺" if diff > 0 else ("🔻" if diff < 0 else "⟷")
+            else:
+                return "🔻" if diff > 0 else ("🔺" if diff < 0 else "⟷")
+
+        def _fmt_cell(cur_val, ref_val, is_pct=False, higher_is_better=True):
+            if ref_val is None:
+                return f"{cur_val:.2f}{'%' if is_pct else ''} <span style='color:#aaa'>(n/a)</span>"
+            diff = cur_val - ref_val
+            arrow = _delta_emoji(diff, higher_is_better=higher_is_better)
+            if is_pct:
+                return f"{cur_val:.1f}% <span style='opacity:0.9'>({arrow} {diff:+.1f}%)</span>"
+            else:
+                return f"{cur_val:.2f} <span style='opacity:0.9'>({arrow} {diff:+.2f})</span>"
+
+        # Build a compact comparison table
+        comp_html = f"""
+        <div style="margin-top:8px; padding:10px 12px; background:#2a2a2a; border-radius:10px;">
+          <div style="font-weight:700; margin-bottom:6px;">📊 Quick Comparisons</div>
+          <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+              <tr style="text-align:left; background:#333;">
+                <th style="padding:6px;">Metric</th>
+                <th style="padding:6px;">Current Round</th>
+                <th style="padding:6px;">vs Prev 5 Rounds</th>
+                <th style="padding:6px;">vs Last 100 Holes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="background:#2f2f2f;">
+                <td style="padding:6px; font-weight:600;">Putts / Hole</td>
+                <td style="padding:6px;">{cur_putts:.2f}</td>
+                <td style="padding:6px;">{_fmt_cell(cur_putts, p5_putts, is_pct=False, higher_is_better=False)}</td>
+                <td style="padding:6px;">{_fmt_cell(cur_putts, h100_putts, is_pct=False, higher_is_better=False)}</td>
+              </tr>
+              <tr style="background:#282828;">
+                <td style="padding:6px; font-weight:600;">GIR %</td>
+                <td style="padding:6px;">{cur_gir:.1f}%</td>
+                <td style="padding:6px;">{_fmt_cell(cur_gir, p5_gir, is_pct=True, higher_is_better=True)}</td>
+                <td style="padding:6px;">{_fmt_cell(cur_gir, h100_gir, is_pct=True, higher_is_better=True)}</td>
+              </tr>
+              <tr style="background:#2f2f2f;">
+                <td style="padding:6px; font-weight:600;">Fairway % (P4/P5)</td>
+                <td style="padding:6px;">{cur_fw:.1f}%</td>
+                <td style="padding:6px;">{_fmt_cell(cur_fw, p5_fw, is_pct=True, higher_is_better=True)}</td>
+                <td style="padding:6px;">{_fmt_cell(cur_fw, h100_fw, is_pct=True, higher_is_better=True)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        """.strip()
+
+        st.markdown(comp_html, unsafe_allow_html=True)
+
+except Exception as _comp_err:
+    # Stay silent in UI if comparisons fail; log to Streamlit text for debugging (optional)
+    st.debug(f"Comparison block skipped: {_comp_err}")
+
 
 
 
