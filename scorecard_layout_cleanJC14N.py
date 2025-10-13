@@ -416,7 +416,128 @@ if total_updown_ops:
 else:
     updowns_display = "0/0 (-)"
 
+# --- Score-to-par benchmarks (current, last 5 rounds avg, last 100 holes total & per-18) ---
+
+# Current round over par
+current_over_par = int(total_score - sum(pars))
+
+# Helper: compute round-level "over par" for a given Round Link inside the (already filtered) dataframe
+def _round_over_par(df, round_id):
+    block = df[df["Round Link"] == round_id]
+    hole_sum = pd.to_numeric(block["Hole Score"], errors="coerce").sum()
+    par_sum  = pd.to_numeric(block["Par"],        errors="coerce").sum()
+    return int(hole_sum - par_sum)
+
+# Last 5 complete rounds by date (within current sidebar filters)
+if {"Date Played", "Round Link"} <= set(filtered_df.columns):
+    last5_round_ids = (
+        filtered_df[["Round Link", "Date Played"]]
+        .drop_duplicates()
+        .sort_values("Date Played")
+        .tail(5)["Round Link"]
+        .tolist()
+    )
+else:
+    last5_round_ids = []
+
+last5_over_par_values = [_round_over_par(filtered_df, rid) for rid in last5_round_ids]
+last5_avg_over_par = (sum(last5_over_par_values) / len(last5_over_par_values)) if last5_over_par_values else 0.0
+
+# Last 100 holes (by played date) — total Δ and per-18 normalization
+last100 = filtered_df.sort_values("Date Played").tail(100)
+last100_total_over_par = int(
+    pd.to_numeric(last100["Hole Score"], errors="coerce").sum()
+    - pd.to_numeric(last100["Par"],        errors="coerce").sum()
+)
+n_last100_holes = int(last100.shape[0]) if last100 is not None else 0
+last100_per18 = (last100_total_over_par * 18 / n_last100_holes) if n_last100_holes else 0.0
+
+# Formatter for floating deltas (keeps one decimal and adds + sign)
+def _fmt_par_float(x: float) -> str:
+    if abs(x) < 1e-9:
+        return "E"
+    return f"{'+' if x > 0 else ''}{x:.1f}"
+
+# Strings for display (use your existing _fmt_to_par for integers)
+bench_current_str        = _fmt_to_par(current_over_par)                 # e.g. "+6"
+bench_last5_avg_str      = _fmt_par_float(last5_avg_over_par)            # e.g. "+10.2"
+bench_last100_total_str  = _fmt_to_par(last100_total_over_par)           # e.g. "+73"
+bench_last100_per18_str  = _fmt_par_float(last100_per18)                 # e.g. "+13.1"
+
+benchmarks_html = f"""
+<div style="margin-top:6px; line-height:1.6;">
+  <b>Score to Par — Benchmarks</b><br>
+  Current Round: {bench_current_str}<br>
+  Last 5 Rounds (avg): {bench_last5_avg_str}<br>
+  Last 100 Holes — Total: {bench_last100_total_str} | Per-18: {bench_last100_per18_str}
+</div>
+"""
+
 # --- Header (round info), Bubble cards, and Details (text blocks) ---
+# --- Benchmarks: last 5 rounds / last 100 holes (Up&Downs, Scrambles, Lost Balls) ---
+player_df = df[df["Player Name"] == player].copy()
+player_df["Date Played"] = pd.to_datetime(player_df["Date Played"], errors="coerce")
+
+# Per-round ordering (most recent round date first)
+round_order = (
+    player_df.groupby("Round Link")["Date Played"].max()
+    .sort_values(ascending=False)
+)
+
+last5_round_ids = round_order.index[:5].tolist()
+last5_df = player_df[player_df["Round Link"].isin(last5_round_ids)]
+
+# Last 100 holes for this player (most recent rows first)
+last100_df = player_df.sort_values("Date Played", ascending=False).head(100)
+
+def _safe_int(series):
+    return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
+
+def ud_stats(frame: pd.DataFrame):
+    gir0 = (_safe_int(frame.get("GIR", 0)) == 0)
+    putt1 = (_safe_int(frame.get("Putts", 0)) == 1)
+    up_made = int((gir0 & putt1).sum())
+    up_ops = int(_safe_int(frame.get("Scramble Opportunity", 0)).sum())
+    pct = (up_made / up_ops * 100) if up_ops else 0.0
+    return up_made, up_ops, pct
+
+def scramble_stats(frame: pd.DataFrame):
+    made = int(_safe_int(frame.get("Scramble", 0)).sum())
+    ops  = int(_safe_int(frame.get("Scramble Opportunity", 0)).sum())
+    pct = (made / ops * 100) if ops else 0.0
+    return made, ops, pct
+
+def lostball_stats(frame: pd.DataFrame):
+    tee  = int(_safe_int(frame.get("Lost Ball Tee Shot Quantity", 0)).sum())
+    appr = int(_safe_int(frame.get("Lost Ball Approach Shot Quantity", 0)).sum())
+    total = tee + appr
+    rounds_n = max(1, int(frame["Round Link"].nunique())) if "Round Link" in frame else 1
+    holes_n = int(frame.shape[0])
+    per_round = total / rounds_n
+    per_18 = (total / (holes_n / 18.0)) if holes_n else 0.0
+    return tee, appr, total, per_round, per_18
+
+# Compute for last 5 rounds
+ud5_m, ud5_o, ud5_pct = ud_stats(last5_df)
+sc5_m, sc5_o, sc5_pct = scramble_stats(last5_df)
+lb5_t, lb5_a, lb5_tot, lb5_per_round, lb5_per18 = lostball_stats(last5_df)
+
+# Compute for last 100 holes
+ud100_m, ud100_o, ud100_pct = ud_stats(last100_df)
+sc100_m, sc100_o, sc100_pct = scramble_stats(last100_df)
+lb100_t, lb100_a, lb100_tot, lb100_per_round, lb100_per18 = lostball_stats(last100_df)
+
+# Compact comparisons block (separate HTML so we don't alter existing summary blocks)
+comparisons_html = f"""
+<div style="margin-top:6px; padding:10px; background:#262626; border-radius:10px; line-height:1.6;">
+  <b>📊 Benchmarks (Recent)</b><br>
+  <b>Up &amp; Downs</b> — Last 5: {ud5_m}/{ud5_o} ({ud5_pct:.1f}%) | Last 100: {ud100_m}/{ud100_o} ({ud100_pct:.1f}%)<br>
+  <b>Scrambles</b> — Last 5: {sc5_m}/{sc5_o} ({sc5_pct:.1f}%) | Last 100: {sc100_m}/{sc100_o} ({sc100_pct:.1f}%)<br>
+  <b>Lost Balls</b> — Last 5: Tee {lb5_t} / Appr {lb5_a} / Total {lb5_tot} <span style="color:#aaa;">(avg {lb5_per_round:.2f}/rnd, {lb5_per18:.2f}/18)</span><br>
+  <b>Lost Balls</b> — Last 100: Tee {lb100_t} / Appr {lb100_a} / Total {lb100_tot} <span style="color:#aaa;">(avg {lb100_per_round:.2f}/rnd, {lb100_per18:.2f}/18)</span>
+</div>
+"""
+
 summary_header_html = f"""
 🏌️ {player} | {course} | {date}<br><br>
 <b>📊 Round Totals — {holes_played} Holes</b>
@@ -481,6 +602,234 @@ Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_di
 # Render header + bubbles right under the scorecard (before visuals)
 st.markdown(summary_header_html, unsafe_allow_html=True)
 st.markdown(cards_html, unsafe_allow_html=True)
+# Benchmarks block (score to par)
+st.markdown(benchmarks_html, unsafe_allow_html=True)
+
+# --- Score to Par: Current vs Last 5 Rounds vs Last 100 Holes ---
+# (Safe, stand-alone, does not overwrite existing variables)
+
+# Build a player-only dataframe in chronological order
+_player_df = df[df["Player Name"] == player].copy()
+_player_df["Date Played"] = pd.to_datetime(_player_df["Date Played"], errors="coerce")
+_player_df["Hole Score"]  = pd.to_numeric(_player_df["Hole Score"], errors="coerce")
+_player_df["Par"]         = pd.to_numeric(_player_df["Par"], errors="coerce")
+_player_df = _player_df.sort_values(["Date Played", "Round Link", "Hole"])
+
+# Current round score-to-par (you already calculate total_score & pars above)
+_stp_current = int(total_score - sum(pars))  # already protected above
+
+# Last 5 rounds: average score-to-par per round
+_round_stp = (
+    _player_df
+    .assign(delta=_player_df["Hole Score"] - _player_df["Par"])
+    .groupby("Round Link", dropna=True)["delta"]
+    .sum()
+    .sort_index()  # order by Round Link grouping (we already sorted rows by date)
+)
+_last5 = _round_stp.tail(5)
+_stp_last5_avg = float(_last5.mean()) if len(_last5) else float("nan")
+
+# Last 100 holes: total score-to-par, plus scaled per-18
+_last100 = _player_df.tail(100)
+_stp_last100_total = int((_last100["Hole Score"] - _last100["Par"]).sum()) if not _last100.empty else 0
+_stp_last100_per18 = (_stp_last100_total / 100.0 * 18.0) if len(_last100) == 100 else float("nan")
+
+def _fmt_stp(n):
+    # n can be int or float('nan')
+    try:
+        if pd.isna(n):
+            return "—"
+        n = int(round(n))
+        return "E" if n == 0 else (f"+{n}" if n > 0 else f"{n}")
+    except Exception:
+        return "—"
+
+# Small comparison panel (HTML)
+stp_panel_html = f"""
+<div style="margin-top:10px; background:#2a2a2a; border-radius:12px; padding:12px;">
+  <div style="font-weight:700; margin-bottom:6px;">Score to Par — Benchmarks</div>
+  <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px;">
+    <div style="background:#232323; border-radius:10px; padding:10px;">
+      <div style="font-size:12px; color:#aaa;">Current Round</div>
+      <div style="font-size:22px; font-weight:800;">{_fmt_stp(_stp_current)}</div>
+    </div>
+    <div style="background:#232323; border-radius:10px; padding:10px;">
+      <div style="font-size:12px; color:#aaa;">Last 5 Rounds (avg)</div>
+      <div style="font-size:22px; font-weight:800;">{_fmt_stp(_stp_last5_avg)}</div>
+    </div>
+    <div style="background:#232323; border-radius:10px; padding:10px;">
+      <div style="font-size:12px; color:#aaa;">Last 100 Holes</div>
+      <div style="font-size:16px; font-weight:800; line-height:1.2;">
+        Total: {_fmt_stp(_stp_last100_total)}<br>
+        <span style="font-size:12px; color:#bbb;">Per-18: {_fmt_stp(_stp_last100_per18)}</span>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+st.markdown(stp_panel_html, unsafe_allow_html=True)
+
+st.markdown(comparisons_html, unsafe_allow_html=True)
+
+# =============== QUICK COMPARISONS (Current vs Prev 5 Rounds / Last 100 Holes) ===============
+# Build a player history excluding the current round
+_hist = df[df["Player Name"] == player].copy()
+_hist["Date Played"] = pd.to_datetime(_hist["Date Played"], errors="coerce")
+_current_round_id = selected_round
+_current_round_date = pd.to_datetime(round_data["Date Played"].iloc[0], errors="coerce")
+
+# Exclude current round rows from history
+_hist_excl = _hist[_hist["Round Link"] != _current_round_id].copy()
+
+# --- Helper functions ---
+def _safe_num(x):
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+def _gir_pct(dataframe):
+    if dataframe.empty or "GIR" not in dataframe:
+        return None
+    made = pd.to_numeric(dataframe["GIR"], errors="coerce").fillna(0).sum()
+    total = len(dataframe)
+    return (made / total * 100.0) if total else None
+
+def _fw_pct_p45(dataframe):
+    if dataframe.empty or "Fairway" not in dataframe or "Par" not in dataframe:
+        return None
+    block = dataframe[dataframe["Par"].isin([4, 5])]
+    if block.empty:
+        return None
+    made = pd.to_numeric(block["Fairway"], errors="coerce").fillna(0).sum()
+    total = block["Fairway"].count()
+    return (made / total * 100.0) if total else None
+
+def _putts_per_hole(dataframe):
+    if dataframe.empty or "Putts" not in dataframe:
+        return None
+    return pd.to_numeric(dataframe["Putts"], errors="coerce").fillna(0).mean()
+
+def _putts_per_round_mean(dataframe):
+    # Average total putts per round, over the rounds present in `dataframe`
+    if dataframe.empty or "Putts" not in dataframe or "Round Link" not in dataframe:
+        return None
+    per_round = (
+        dataframe.assign(P=pd.to_numeric(dataframe["Putts"], errors="coerce").fillna(0))
+        .groupby("Round Link")["P"]
+        .sum()
+    )
+    return per_round.mean() if not per_round.empty else None
+
+def _delta_str(curr, ref, suffix=""):
+    if curr is None or ref is None:
+        return "—"
+    diff = curr - ref
+    arrow = "🔺" if diff > 0 else ("🔻" if diff < 0 else "—")
+    # show absolute difference; signed with +/-
+    return f"{arrow} {diff:+.1f}{suffix}"
+
+def _fmt_val(v, suffix=""):
+    if v is None:
+        return "n/a"
+    return f"{v:.1f}{suffix}"
+
+# --- Windows: Prev 5 rounds, Last 100 holes ---
+# Prev 5 rounds = 5 most recent unique Round Link values BEFORE the current round date (or simply excluding current)
+_prev5_round_ids = (
+    _hist_excl.sort_values("Date Played")
+              .dropna(subset=["Round Link"])
+              .drop_duplicates(subset=["Round Link"], keep="last")
+              .sort_values("Date Played", ascending=False)["Round Link"]
+              .head(5)
+              .tolist()
+)
+_prev5_df = _hist_excl[_hist_excl["Round Link"].isin(_prev5_round_ids)].copy()
+
+# Last 100 holes (regardless of round boundaries)
+_last100_df = _hist_excl.sort_values(["Date Played", "Hole"], ascending=[False, True]).head(100).copy()
+
+# --- Compute historical metrics ---
+prev5_gir = _gir_pct(_prev5_df)
+last100_gir = _gir_pct(_last100_df)
+
+prev5_fw = _fw_pct_p45(_prev5_df)
+last100_fw = _fw_pct_p45(_last100_df)
+
+prev5_pph = _putts_per_hole(_prev5_df)          # putts per hole
+last100_pph = _putts_per_hole(_last100_df)      # putts per hole
+
+prev5_ppr = _putts_per_round_mean(_prev5_df)    # average putts per round
+
+# For "Putts / Round" against last 100 holes, use a round-equivalent (18 * putts/HOLE)
+last100_ppr_equiv = (last100_pph * 18.0) if last100_pph is not None else None
+
+# --- Current values (already computed earlier in your script) ---
+curr_pph = putts_per_hole                              # float
+curr_ppr = float(total_putts)                          # total putts this round
+curr_gir = gir_pct                                     # %
+curr_fw  = fw_pct                                      # %
+
+# --- Build comparison table HTML ---
+comp_html = f"""
+<div style="margin-top:8px; padding:12px; background:#262626; border-radius:12px;">
+  <div style="font-weight:700; margin-bottom:8px;">📊 Quick Comparisons</div>
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr style="background:#333;">
+        <th style="text-align:left; padding:6px;">Metric</th>
+        <th style="text-align:center; padding:6px;">Current</th>
+        <th style="text-align:center; padding:6px;">Prev 5 (value)</th>
+        <th style="text-align:center; padding:6px;">Δ vs Prev 5</th>
+        <th style="text-align:center; padding:6px;">Last 100 (value)</th>
+        <th style="text-align:center; padding:6px;">Δ vs Last 100</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background:#2d2d2d;">
+        <td style="padding:6px; font-weight:600;">Putts / Hole</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(curr_pph)}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(prev5_pph)}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_pph, prev5_pph)}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(last100_pph)}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_pph, last100_pph)}</td>
+      </tr>
+      <tr style="background:#262626;">
+        <td style="padding:6px; font-weight:600;">Putts / Round</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(curr_ppr)}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(prev5_ppr)}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_ppr, prev5_ppr)}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(last100_ppr_equiv)}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_ppr, last100_ppr_equiv)}</td>
+      </tr>
+      <tr style="background:#2d2d2d;">
+        <td style="padding:6px; font-weight:600;">GIR %</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(curr_gir, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(prev5_gir, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_gir, prev5_gir, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(last100_gir, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_gir, last100_gir, '%')}</td>
+      </tr>
+      <tr style="background:#262626;">
+        <td style="padding:6px; font-weight:600;">Fairway % (P4/P5)</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(curr_fw, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(prev5_fw, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_fw, prev5_fw, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_fmt_val(last100_fw, '%')}</td>
+        <td style="text-align:center; padding:6px;">{_delta_str(curr_fw, last100_fw, '%')}</td>
+      </tr>
+    </tbody>
+  </table>
+  <div style="margin-top:6px; font-size:12px; color:#aaa;">
+    Putts / Round for “Last 100” is a round-equivalent = 18 × (putts/HOLE over last 100 holes).
+  </div>
+</div>
+"""
+
+st.markdown(comp_html, unsafe_allow_html=True)
+# =============== END QUICK COMPARISONS =======================================================
+
 # ---- Comparison: current round vs prev 5 rounds & last 100 holes (player history) ----
 try:
     # Work off the full dataset for the selected player, excluding the current round for comparisons
@@ -772,6 +1121,79 @@ pts = alt.Chart(df_line).mark_point(size=70).encode(
 )
 
 st.altair_chart(zero + line + pts, use_container_width=True)
+# --- Score-to-Par audit & comparison (non-destructive debug panel) ---
+with st.expander("🔎 Debug: Score-to-Par audit (current vs last 5 rounds / last 100 holes)", expanded=False):
+    # ----- CURRENT ROUND (per-hole & totals) -----
+    audit = round_data.copy()
+    audit["ParN"]   = pd.to_numeric(audit["Par"], errors="coerce").fillna(0)
+    audit["ScoreN"] = pd.to_numeric(audit["Hole Score"], errors="coerce").fillna(0)
+    audit["Delta"]  = audit["ScoreN"] - audit["ParN"]
+    cur_delta_sum   = int(audit["Delta"].sum())
+    cur_score_sum   = int(audit["ScoreN"].sum())
+    cur_par_sum     = int(audit["ParN"].sum())
+
+    st.markdown("**Current round — per hole**")
+    st.dataframe(
+        audit.sort_values("Hole")[["Hole", "ParN", "ScoreN", "Delta"]]
+        .rename(columns={"ParN":"Par","ScoreN":"Score"}),
+        use_container_width=True
+    )
+    st.write(
+        f"**Current totals** — Score: {cur_score_sum} | Par: {cur_par_sum} | "
+        f"Δ (Score−Par): {cur_delta_sum:+d}"
+    )
+
+    # ----- PLAYER-WIDE HISTORY PREP -----
+    player_df = df[df["Player Name"] == player].copy()
+    player_df["Date Played"] = pd.to_datetime(player_df["Date Played"], errors="coerce")
+    player_df["ParN"]   = pd.to_numeric(player_df["Par"], errors="coerce")
+    player_df["ScoreN"] = pd.to_numeric(player_df["Hole Score"], errors="coerce")
+    player_df = player_df.dropna(subset=["Date Played", "ParN", "ScoreN"])
+    player_df = player_df.sort_values(["Date Played", "Round Link", "Hole"])
+
+    # ----- LAST 5 ROUNDS (round-by-round Δ, then average) -----
+    per_round = (
+        player_df
+        .groupby(["Round Link", "Date Played"], as_index=False)
+        .apply(lambda g: pd.Series({
+            "holes": g["Hole"].count(),
+            "delta_sum": (g["ScoreN"] - g["ParN"]).sum()
+        }))
+        .reset_index(drop=True)
+        .sort_values("Date Played")
+    )
+    last5 = per_round.tail(5)
+    st.markdown("**Last 5 rounds (by date)**")
+    st.dataframe(last5[["Date Played", "Round Link", "holes", "delta_sum"]], use_container_width=True)
+
+    if not last5.empty:
+        stp_last5_avg = last5["delta_sum"].mean()
+        st.write(f"**Average score-to-par over last {len(last5)} rounds:** {stp_last5_avg:+.1f}")
+    else:
+        st.write("**Average score-to-par over last 5 rounds:** —")
+
+    # ----- LAST 100 HOLES (hole-by-hole Δ total and per-18 scaling) -----
+    last100 = player_df.tail(100)
+    if not last100.empty:
+        last100_delta_total = (last100["ScoreN"] - last100["ParN"]).sum()
+        last100_per18 = last100_delta_total / len(last100) * 18
+        st.write(
+            f"**Last {len(last100)} holes** — Δ total: {last100_delta_total:+.1f} | "
+            f"per-18: {last100_per18:+.1f}"
+        )
+    else:
+        st.write("**Last 100 holes:** —")
+
+    # ----- QUICK SANITY FLAGS (help spot data issues) -----
+    # Duplicate hole rows in current round
+    dup_holes = int(round_data.duplicated(subset=["Hole"]).sum())
+    # Non-18-hole rounds in history (just a heads-up)
+    non18 = per_round.loc[per_round["holes"] != 18, "holes"].value_counts().to_dict()
+    if dup_holes:
+        st.warning(f"Found {dup_holes} duplicate hole number(s) in the current round.")
+    if non18:
+        st.info(f"Historical rounds with non-18 hole counts detected: {non18}")
+
 
 
 
