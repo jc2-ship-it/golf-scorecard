@@ -671,6 +671,181 @@ stp_panel_html = f"""
 st.markdown(stp_panel_html, unsafe_allow_html=True)
 
 st.markdown(comparisons_html, unsafe_allow_html=True)
+# ===================== YEARLY SUMMARY (2025) — per selected player =====================
+# Build a 2025-only dataset for the selected player (ignores sidebar year filter)
+y_player = str(player)
+y_df = df[(df["Player Name"] == y_player) & (df["Year"] == 2025)].copy()
+
+if not y_df.empty:
+    # Coerce numerics safely
+    y_df["Par"] = pd.to_numeric(y_df["Par"], errors="coerce").fillna(0)
+    y_df["Hole Score"] = pd.to_numeric(y_df["Hole Score"], errors="coerce").fillna(0)
+    y_df["Putts"] = pd.to_numeric(y_df["Putts"], errors="coerce").fillna(0)
+    y_df["GIR"] = pd.to_numeric(y_df.get("GIR", 0), errors="coerce").fillna(0)
+    y_df["Fairway"] = pd.to_numeric(y_df.get("Fairway", 0), errors="coerce").fillna(0)
+    y_df["Approach GIR Value"] = pd.to_numeric(y_df.get("Approach GIR Value", 0), errors="coerce").fillna(0)
+    y_df["Scramble"] = pd.to_numeric(y_df.get("Scramble", 0), errors="coerce").fillna(0)
+    y_df["Scramble Opportunity"] = pd.to_numeric(y_df.get("Scramble Opportunity", 0), errors="coerce").fillna(0)
+    y_df["Seve"] = pd.to_numeric(y_df.get("Seve", 0), errors="coerce").fillna(0)
+    y_df["Arnie"] = pd.to_numeric(y_df.get("Arnie", 0), errors="coerce").fillna(0)
+    y_df["Pro Par"] = pd.to_numeric(y_df.get("Pro Par", 0), errors="coerce").fillna(0)
+    y_df["Pro Birdie"] = pd.to_numeric(y_df.get("Pro Birdie", 0), errors="coerce").fillna(0)
+    y_df["Pro Eagle+"] = pd.to_numeric(y_df.get("Pro Eagle+", 0), errors="coerce").fillna(0)
+    y_df["Lost Ball Tee Shot Quantity"] = pd.to_numeric(y_df.get("Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0)
+    y_df["Lost Ball Approach Shot Quantity"] = pd.to_numeric(y_df.get("Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0)
+    y_df["Proximity to Hole - How far is your First Putt (FT)"] = pd.to_numeric(
+        y_df.get("Proximity to Hole - How far is your First Putt (FT)", 0), errors="coerce"
+    ).fillna(0)
+
+    # Totals / deltas
+    y_holes = int(y_df.shape[0])
+    y_score_sum = int(y_df["Hole Score"].sum())
+    y_par_sum = int(y_df["Par"].sum())
+    y_delta = int(y_score_sum - y_par_sum)
+
+    # Averages (score & putts)
+    y_score_per_hole = (y_score_sum / y_holes) if y_holes else 0.0
+    y_avg9 = round(y_score_per_hole * 9)
+    y_avg18 = round(y_score_per_hole * 18)
+
+    y_putts_total = int(y_df["Putts"].sum())
+    y_putts_per_hole = (y_putts_total / y_holes) if y_holes else 0.0
+    y_putts_per18 = y_putts_per_hole * 18
+
+    # Fairways (Par 4/5 only)
+    y_p45 = y_df[y_df["Par"].isin([4, 5])]
+    y_fw_made = int(y_p45["Fairway"].sum())
+    y_fw_attempts = int(y_p45.shape[0])
+    y_fw_pct = (y_fw_made / y_fw_attempts * 100.0) if y_fw_attempts else 0.0
+
+    # GIR (official + "unofficial")
+    y_gir_made = int(y_df["GIR"].sum())
+    y_gir_pct = (y_gir_made / y_holes * 100.0) if y_holes else 0.0
+    y_ugir_made = int(y_df["Approach GIR Value"].sum())
+    y_ugir_pct = (y_ugir_made / y_holes * 100.0) if y_holes else 0.0
+
+    # Birdie putt attempts within distance (GIR holes are birdie putts)
+    y_first_putt_ft = y_df["Proximity to Hole - How far is your First Putt (FT)"]
+    y_is_birdie_putt = (y_df["GIR"] == 1)
+    y_bpa_20 = int(((y_is_birdie_putt) & (y_first_putt_ft <= 20)).sum())
+    y_bpa_10 = int(((y_is_birdie_putt) & (y_first_putt_ft <= 10)).sum())
+
+    # Scoring averages by hole par
+    def _avg_score_for_par(par_val):
+        block = y_df[y_df["Par"] == par_val]["Hole Score"]
+        return float(block.mean()) if not block.empty else 0.0
+
+    y_p3_avg = _avg_score_for_par(3)
+    y_p4_avg = _avg_score_for_par(4)
+    y_p5_avg = _avg_score_for_par(5)
+
+    # GIR% by par & FW% by par
+    def _pct(col, frame):
+        total = frame.shape[0]
+        made = frame[col].sum()
+        return (made / total * 100.0) if total else 0.0
+
+    y_gir_p3 = _pct("GIR", y_df[y_df["Par"] == 3])
+    y_gir_p4 = _pct("GIR", y_df[y_df["Par"] == 4])
+    y_gir_p5 = _pct("GIR", y_df[y_df["Par"] == 5])
+
+    y_fw_p4 = _pct("Fairway", y_df[y_df["Par"] == 4])
+    y_fw_p5 = _pct("Fairway", y_df[y_df["Par"] == 5])
+
+    # Score breakdown (labels)
+    lbl = y_df.get("Score Label", pd.Series([""] * y_df.shape[0], index=y_df.index))
+    def _cnt(name): return int((lbl == name).sum())
+    brk_eagle = _cnt("Eagle")
+    brk_birdie = _cnt("Birdie")
+    brk_par = _cnt("Par")
+    brk_bogey = _cnt("Bogey")
+    brk_double = _cnt("Double Bogey")
+    brk_triplep = _cnt("Triple Bogey +")
+    # percents
+    def _pct_of_total(n): return (n / y_holes * 100.0) if y_holes else 0.0
+    p_eagle = _pct_of_total(brk_eagle)
+    p_birdie = _pct_of_total(brk_birdie)
+    p_par = _pct_of_total(brk_par)
+    p_bogey = _pct_of_total(brk_bogey)
+    p_double = _pct_of_total(brk_double)
+    p_triplep = _pct_of_total(brk_triplep)
+
+    # Scramble% and Up&Down%
+    y_scr_made = int(y_df["Scramble"].sum())
+    y_scr_ops = int(y_df["Scramble Opportunity"].sum())
+    y_scr_pct = (y_scr_made / y_scr_ops * 100.0) if y_scr_ops else 0.0
+
+    y_up_made = int(((y_df["GIR"] == 0) & (y_df["Putts"] == 1)).sum())
+    y_up_ops = int(y_df["Scramble Opportunity"].sum())
+    y_up_pct = (y_up_made / y_up_ops * 100.0) if y_up_ops else 0.0
+
+    # Sand Save% (only if present)
+    if ("Sand Save" in y_df.columns) and ("Sand Save Opportunity" in y_df.columns):
+        y_df["Sand Save"] = pd.to_numeric(y_df["Sand Save"], errors="coerce").fillna(0)
+        y_df["Sand Save Opportunity"] = pd.to_numeric(y_df["Sand Save Opportunity"], errors="coerce").fillna(0)
+        y_ss_made = int(y_df["Sand Save"].sum())
+        y_ss_ops = int(y_df["Sand Save Opportunity"].sum())
+        y_ss_pct = (y_ss_made / y_ss_ops * 100.0) if y_ss_ops else 0.0
+    else:
+        y_ss_pct = None  # not available
+
+    # Putting details
+    y_one_putts = int((y_df["Putts"] == 1).sum())
+    y_three_plus = int((y_df["Putts"] >= 3).sum())
+    y_bogey_rows = (lbl == "Bogey")
+    y_three_putt_bogeys = int(((y_df["Putts"] >= 3) & y_bogey_rows).sum())
+    y_three_putt_bogey_pct = (y_three_putt_bogeys / y_three_plus * 100.0) if y_three_plus else 0.0
+
+    # Other tallies
+    y_arnies = int(y_df["Arnie"].sum())
+    y_seves = int(y_df["Seve"].sum())
+    y_propars_plus = int(y_df["Pro Par"].sum() + y_df["Pro Birdie"].sum() + y_df["Pro Eagle+"].sum())
+
+    # Lost balls
+    y_lb_tee = int(y_df["Lost Ball Tee Shot Quantity"].sum())
+    y_lb_appr = int(y_df["Lost Ball Approach Shot Quantity"].sum())
+    y_lb_total = int(y_lb_tee + y_lb_appr)
+
+    # Little badge helpers
+    def _ice_if_low(pct, low=35):  # for % where higher is good
+        return " 🧊" if pct < low else ""
+    def _moon_if_ok(pct, good=33): # gentle badge if ≥ threshold
+        return " 🌕" if pct >= good else ""
+
+    # Build HTML
+    yearly_html = f"""
+    <div style="margin-top:10px; padding:12px; background:#262626; border-radius:12px; line-height:1.6;">
+      <div style="font-weight:800; font-size:16px;">📅 Yearly Summary ➤ 2025 | {y_player}</div>
+      <div>⛳ <b>Total Holes Played:</b> {y_holes}</div>
+      <div>🎯 <b>Score:</b> {y_score_sum} ({'+' if y_delta>0 else ''}{y_delta})</div>
+      <div>📌 <b>Avg Score ➤ 9H:</b> {y_avg9} | <b>18H:</b> {y_avg18}</div>
+      <div>🟢 <b>Putts:</b> {y_putts_total} ({y_putts_per_hole:.2f}/hole | {y_putts_per18:.1f}/18{_ice_if_low(100 - min(y_putts_per18,100))})</div>
+      <div>🏹 <b>Fairways Hit:</b> {y_fw_made} / {y_fw_attempts} ({y_fw_pct:.1f}%){_ice_if_low(y_fw_pct)}</div>
+      <div>⛳ <b>GIR:</b> {y_gir_made} / {y_holes} ({y_gir_pct:.1f}%)</div>
+      <div>🟡 <b>Unofficial GIR:</b> {y_ugir_made} / {y_holes} ({y_ugir_pct:.1f}%)</div>
+      <div>🎯 <b>Birdie Putt Attempts ➤ ≤20ft:</b> {y_bpa_20} | ≤10ft: {y_bpa_10}</div>
+
+      <div>📈 <b>Scoring Averages ➤</b> Par 3: {y_p3_avg:.2f} | Par 4: {y_p4_avg:.2f} | Par 5: {y_p5_avg:.2f}</div>
+      <div>🎯 <b>GIR % ➤</b> Par 3: {y_gir_p3:.1f}%{_moon_if_ok(y_gir_p3)} | Par 4: {y_gir_p4:.1f}%{_moon_if_ok(y_gir_p4)} | Par 5: {y_gir_p5:.1f}%{_moon_if_ok(y_gir_p5)}</div>
+      <div>🏹 <b>FW % ➤</b> Par 4: {y_fw_p4:.1f}%{_ice_if_low(y_fw_p4)} | Par 5: {y_fw_p5:.1f}%{_ice_if_low(y_fw_p5)}</div>
+
+      <div>📊 <b>Score Breakdown ➤</b>
+        🦅 E-{brk_eagle} | 🐥 B-{brk_birdie} | 🟩 P-{brk_par} | 🟠 Bgy-{brk_bogey} | 🔴 Dbl-{brk_double} | 💀 Trp+ {brk_triplep}<br>
+        <span style="color:#aaa;">({p_eagle:.1f}% | {p_birdie:.1f}% | {p_par:.1f}% | {p_bogey:.1f}% | {p_double:.1f}% | {p_triplep:.1f}%)</span>
+      </div>
+
+      <div>🔁 <b>Scramble %:</b> {y_scr_pct:.1f}% | <b>U&amp;D %:</b> {y_up_pct:.1f}% | <b>Sand Save %:</b> {f"{y_ss_pct:.1f}%" if y_ss_pct is not None else "—"}</div>
+      <div>🥄 <b>Putting ➤</b> ✅ 1P: {y_one_putts} | 🔴 3P: {y_three_plus} | 💀 3P Bgy: {y_three_putt_bogeys} ({y_three_putt_bogey_pct:.1f}% 💀)</div>
+      <div>🧱 <b>Arnies:</b> {y_arnies} | 🎨 <b>Seves:</b> {y_seves} | 💪 <b>Pro Pars +:</b> {y_propars_plus}</div>
+      <div>📦 <b>Lost Balls ➤</b> 🚀 Tee: {y_lb_tee} | 🎯 Approach: {y_lb_appr} | 📦 Total: {y_lb_total}</div>
+    </div>
+    """
+
+    st.markdown(yearly_html, unsafe_allow_html=True)
+else:
+    st.info("No 2025 data for this player yet.")
+# =================== END YEARLY SUMMARY (2025) =============================================
+
 
 # =============== QUICK COMPARISONS (Current vs Prev 5 Rounds / Last 100 Holes) ===============
 # Build a player history excluding the current round
