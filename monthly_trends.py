@@ -220,12 +220,19 @@ def build_chart(metric_df: pd.DataFrame, metric_name: str):
         .encode(y="baseline:Q", text=alt.value(f"Avg: {baseline:.1f}"))
     )
 
+    # ✅ Axis adjustment: auto-scale (no wasted space)
+    y_enc = alt.Y(
+        "Value:Q",
+        title=metric_name,
+        scale=alt.Scale(zero=False, nice=True)
+    )
+
     lines = (
         alt.Chart(metric_df)
         .mark_line(point=alt.OverlayMarkDef(size=60), strokeWidth=2.6)
         .encode(
             x=alt.X("YearMonth:N", sort=month_order, title="Month"),
-            y=alt.Y("Value:Q", title=metric_name),
+            y=y_enc,
             color=alt.Color("Player Name:N", title="Player"),
             tooltip=[
                 alt.Tooltip("YearMonth:N", title="Month"),
