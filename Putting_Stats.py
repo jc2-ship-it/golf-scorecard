@@ -45,10 +45,29 @@ df["Year"] = df["Date Played"].dt.year
 for col in [
     "Player Name", "Course Name", "Hole", "Par", "Putts",
     PROX_COL, YARD_COL, CLUB_COL, "3 Putt Bogey",
+    "GIR", "Approach GIR",
     FEET_MADE_COL, SCORE_COL
 ]:
     if col not in df.columns:
         df[col] = pd.NA
+
+# Normalize GIR fields (allow values like 1/0, True/False, Yes/No)
+def _norm_yes_no(v):
+    if pd.isna(v):
+        return pd.NA
+    s = str(v).strip().lower()
+    if s in ["1", "true", "t", "yes", "y", "hit", "made"]:
+        return "Yes"
+    if s in ["0", "false", "f", "no", "n", "miss", "missed"]:
+        return "No"
+    if s == "yes":
+        return "Yes"
+    if s == "no":
+        return "No"
+    return pd.NA
+
+df["GIR"] = df["GIR"].apply(_norm_yes_no)
+df["Approach GIR"] = df["Approach GIR"].apply(_norm_yes_no)
 
 # Numeric
 df["Putts"] = _as_int(df["Putts"], 0)
@@ -86,6 +105,9 @@ with c4:
     clubs = sorted([x for x in df[CLUB_COL].dropna().unique().tolist() if str(x).strip() != ""])
     sel_clubs = st.multiselect("Approach Club", clubs, default=[])
 
+    sel_gir = st.selectbox("GIR", ["All", "Yes", "No"])
+    sel_appr_gir = st.selectbox("Approach GIR", ["All", "Yes", "No"])
+
 c5, c6 = st.columns([2.2, 1.8], vertical_alignment="bottom")
 with c5:
     holes = sorted([int(x) for x in df["Hole"].dropna().unique().tolist() if int(x) > 0])
@@ -112,6 +134,10 @@ if sel_clubs:
     f = f[f[CLUB_COL].isin(sel_clubs)]
 if sel_holes:
     f = f[f["Hole"].isin(sel_holes)]
+if sel_gir != "All":
+    f = f[f["GIR"] == sel_gir]
+if sel_appr_gir != "All":
+    f = f[f["Approach GIR"] == sel_appr_gir]
 
 # Yardage filter: keep blanks (do not exclude missing yardage)
 f = f[(f["YardN"].isna()) | ((f["YardN"] >= y_low) & (f["YardN"] <= y_high))].copy()
@@ -471,7 +497,7 @@ base2 = alt.Chart(long_df).encode(
     color=alt.Color(
         "Metric:N",
         legend=alt.Legend(title=None, orient="top"),
-        scale=alt.Scale(range=["#22C55E", "#EF4444"])  # green vs red
+        scale=alt.Scale(range=["#22C55E", "#EF4444"])
     ),
     tooltip=[
         alt.Tooltip("Bucket:N", title="Bucket"),
@@ -506,3 +532,82 @@ chart2 = (lines2 + points2 + labels2).properties(height=360).configure_view(
 )
 
 st.altair_chart(chart2, use_container_width=True)
+
+# ---------------------------
+# Visual aid: Attempts by Distance (bars) + Make % (line + dots + label)
+# ---------------------------
+st.subheader("📈 Attempts by Distance (Bars) + Make % (Line + Dots)")
+
+att_df = table[table["Bucket"] != "TOTAL"][["Bucket", "Holes", "1-putts", "1-putt %"]].copy()
+att_df["Bucket"] = pd.Categorical(att_df["Bucket"], categories=BUCKET_ORDER, ordered=True)
+att_df = att_df.sort_values("Bucket")
+
+att_df["Label"] = att_df.apply(
+    lambda r: f"{int(r['1-putts'])}/{int(r['Holes'])} {float(r['1-putt %']):.1f}%" if int(r["Holes"]) else "—",
+    axis=1
+)
+
+base3 = alt.Chart(att_df).encode(
+    x=alt.X("Bucket:N", sort=BUCKET_ORDER, title=None),
+    tooltip=[
+        alt.Tooltip("Bucket:N", title="Bucket"),
+        alt.Tooltip("Holes:Q", title="Attempts (Holes)", format=",.0f"),
+        alt.Tooltip("1-putts:Q", title="Makes (1-putts)", format=",.0f"),
+        alt.Tooltip("1-putt %:Q", title="Make %", format=".1f"),
+    ],
+)
+
+# Bars = attempts (holes)
+bars3 = base3.mark_bar(
+    cornerRadiusTopLeft=7,
+    cornerRadiusTopRight=7,
+    opacity=0.90
+).encode(
+    y=alt.Y("Holes:Q", title="Attempts (Holes)"),
+    color=alt.value("#60A5FA"),
+)
+
+# Line = make% (right axis)
+line3 = base3.mark_line(
+    strokeWidth=4,
+    opacity=0.9
+).encode(
+    y=alt.Y("1-putt %:Q", title="Make % (1-putt %)", axis=alt.Axis(orient="right")),
+    color=alt.value("#22C55E"),
+)
+
+# Dots = make% points
+points3 = base3.mark_point(
+    size=160,
+    filled=True,
+    opacity=0.95
+).encode(
+    y=alt.Y("1-putt %:Q", axis=alt.Axis(orient="right")),
+    color=alt.value("#22C55E"),
+)
+
+# Labels next to dots
+labels3 = base3.mark_text(
+    dx=10,
+    dy=-8,
+    fontSize=12,
+    fontWeight="bold",
+    color="white"
+).encode(
+    y=alt.Y("1-putt %:Q", axis=alt.Axis(orient="right")),
+    text="Label:N"
+)
+
+chart3 = alt.layer(bars3, line3, points3, labels3).resolve_scale(
+    y="independent"
+).properties(height=380).configure_view(
+    strokeOpacity=0
+).configure_axis(
+    labelColor="white",
+    titleColor="white",
+    gridColor="rgba(255,255,255,0.10)",
+    tickColor="rgba(255,255,255,0.20)",
+    domainColor="rgba(255,255,255,0.20)",
+)
+
+st.altair_chart(chart3, use_container_width=True)
