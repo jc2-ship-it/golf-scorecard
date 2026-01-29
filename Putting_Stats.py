@@ -177,16 +177,32 @@ def build_table(frame: pd.DataFrame) -> pd.DataFrame:
     tmp["ParN"] = pd.to_numeric(tmp["Par"], errors="coerce")
     tmp["HoleScoreN"] = pd.to_numeric(tmp["HoleScoreN"], errors="coerce")
 
+    # IMPORTANT: Fix gap between 22 and 23 (e.g., 22.5 was falling into no bucket)
     buckets = [
         ("0–3 ft",   (tmp["ProxN"] >= 0) & (tmp["ProxN"] <= 3)),
         ("3–6 ft",   (tmp["ProxN"] > 3) & (tmp["ProxN"] <= 6)),
         ("6–10 ft",  (tmp["ProxN"] > 6) & (tmp["ProxN"] <= 10)),
         ("10–16 ft", (tmp["ProxN"] > 10) & (tmp["ProxN"] <= 16)),
         ("16–22 ft", (tmp["ProxN"] > 16) & (tmp["ProxN"] <= 22)),
-        ("23–30 ft", (tmp["ProxN"] >= 23) & (tmp["ProxN"] <= 30)),
+        ("23–30 ft", (tmp["ProxN"] > 22) & (tmp["ProxN"] <= 30)),  # <-- FIXED (was >=23)
         ("30–40 ft", (tmp["ProxN"] > 30) & (tmp["ProxN"] <= 40)),
         ("> 40 ft",  (tmp["ProxN"] > 40)),
     ]
+
+    # DEBUG: show any rows that don't land in a bucket
+    all_bucket_mask = False
+    for _, m in buckets:
+        all_bucket_mask = all_bucket_mask | m
+
+    not_bucketed = tmp[~all_bucket_mask].copy()
+    if len(not_bucketed) > 0:
+        st.warning(f"⚠️ {len(not_bucketed)} row(s) have ProxN that don't match any bucket.")
+        st.dataframe(
+            not_bucketed[["Date Played", "Player Name", "Course Name", "Hole", "PuttsN", "ProxN", "FeetMadeN", "HoleScoreN"]]
+            .sort_values(["Date Played", "Hole"]),
+            use_container_width=True,
+            hide_index=True
+        )
 
     rows = []
     for label, mask in buckets:
@@ -421,7 +437,6 @@ base = alt.Chart(chart_plot).encode(
     ],
 )
 
-# Keep your original colors
 if metric in ["3+ putt %", "3-putt bogey %"]:
     bar_color = "#EF4444"   # red
     line_color = "#F97316"  # orange
@@ -572,7 +587,6 @@ base3 = alt.Chart(att_df).encode(
     ],
 )
 
-# Bars = attempts (holes)
 bars3 = base3.mark_bar(
     cornerRadiusTopLeft=7,
     cornerRadiusTopRight=7,
@@ -582,7 +596,6 @@ bars3 = base3.mark_bar(
     color=alt.value("#60A5FA"),
 )
 
-# Line = make% (right axis)
 line3 = base3.mark_line(
     strokeWidth=4,
     opacity=0.9
@@ -591,7 +604,6 @@ line3 = base3.mark_line(
     color=alt.value("#22C55E"),
 )
 
-# Dots = make% points
 points3 = base3.mark_point(
     size=160,
     filled=True,
@@ -601,7 +613,6 @@ points3 = base3.mark_point(
     color=alt.value("#22C55E"),
 )
 
-# Labels next to dots
 labels3 = base3.mark_text(
     dx=10,
     dy=-8,
