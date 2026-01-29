@@ -2,8 +2,11 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-st.set_page_config(page_title="Putting Stats (2025)", layout="wide")
-st.title("⛳ Putting Proximity Table — 2025 (Validation)")
+# ===========================
+# Page
+# ===========================
+st.set_page_config(page_title="Putting Stats", layout="wide")
+st.title("⛳ Putting Proximity Table — Validation")
 
 CSV_FILE = "Hole Data-Grid view (18).csv"
 
@@ -82,11 +85,22 @@ df["YardN"] = pd.to_numeric(df[YARD_COL], errors="coerce")
 df["FeetMadeN"] = pd.to_numeric(df[FEET_MADE_COL], errors="coerce")  # may be blank
 df["3 Putt Bogey"] = _as_int(df["3 Putt Bogey"], 0)
 
-# Force year 2025
-df = df[df["Year"] == 2025].copy()
+# ---------------------------
+# Year filter (All or single year)
+# ---------------------------
+years_available = sorted([int(y) for y in df["Year"].dropna().unique().tolist()])
+year_options = ["All"] + years_available
+sel_year = st.selectbox("Year", year_options, index=0)
+
+if sel_year != "All":
+    df = df[df["Year"] == int(sel_year)].copy()
+
 if df.empty:
-    st.warning("No rows found for Year = 2025.")
+    st.warning("No rows found for the selected year.")
     st.stop()
+
+yr_text = "All Years" if sel_year == "All" else f"Year={sel_year}"
+st.caption(f"Showing: {yr_text}")
 
 # ---------------------------
 # Filters
@@ -264,7 +278,7 @@ def build_table(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 st.caption(
-    "Rules: Year=2025 • Hole-outs removed (Putts=0 excluded) • Blank proximity rows excluded • "
+    f"Rules: {yr_text} • Hole-outs removed (Putts=0 excluded) • Blank proximity rows excluded • "
     "Buckets based on first-putt proximity • Totals shown in-table."
 )
 
@@ -407,6 +421,7 @@ base = alt.Chart(chart_plot).encode(
     ],
 )
 
+# Keep your original colors
 if metric in ["3+ putt %", "3-putt bogey %"]:
     bar_color = "#EF4444"   # red
     line_color = "#F97316"  # orange
