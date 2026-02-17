@@ -178,6 +178,9 @@ sel_pars = st.sidebar.multiselect("Par", [3, 4, 5], default=[3, 4, 5])
 clubs = sorted([x for x in df[CLUB_COL].dropna().unique().tolist() if str(x).strip() != ""])
 sel_clubs = st.sidebar.multiselect("Approach Club", clubs, default=[])
 
+# ✅ Fairway filter (before GIR)
+sel_fw = st.sidebar.selectbox("Fairway (P4/P5 only)", ["All", "Yes", "No"], index=0)
+
 sel_gir = st.sidebar.selectbox("GIR", ["All", "Yes", "No"], index=0)
 sel_appr_gir = st.sidebar.selectbox("Approach GIR", ["All", "Yes", "No"], index=0)
 
@@ -212,6 +215,15 @@ if sel_clubs:
     base_f = base_f[base_f[CLUB_COL].isin(sel_clubs)]
 if sel_holes:
     base_f = base_f[base_f["Hole"].isin(sel_holes)]
+
+# ✅ Fairway filter (only meaningful on Par 4/5; keep Par 3s in slice)
+if sel_fw != "All":
+    p45_mask = base_f["Par"].isin([4, 5])
+    if sel_fw == "Yes":
+        base_f = base_f[~p45_mask | (base_f["Fairway"] == 1)]
+    else:  # "No"
+        base_f = base_f[~p45_mask | (base_f["Fairway"] == 0)]
+
 if sel_gir != "All":
     base_f = base_f[base_f["GIR"] == sel_gir]
 if sel_appr_gir != "All":
@@ -309,7 +321,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["lb_appr"] = lb_appr
     out["lb_total"] = lb_tee + lb_appr
 
-    # One-putts / 3+ / 3-putt bogey
+    # One-putts / 3+
     one_putts = int((_as_int(b["Putts"], 0) == 1).sum())
     out["one_putts"] = one_putts
     out["one_putt_pct"] = _pct(one_putts, holes_played)
@@ -318,9 +330,11 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["three_plus_putts"] = three_plus_putts
     out["three_plus_putt_pct"] = _pct(three_plus_putts, holes_played)
 
+    # ✅ 3 Putt Bogey %: attempts should be GIR hits (not holes played)
     three_putt_bogeys = int(_num(b.get("3 Putt Bogey", 0), 0).sum())
     out["three_putt_bogeys"] = three_putt_bogeys
-    out["three_putt_bogey_pct"] = _pct(three_putt_bogeys, holes_played)
+    out["three_putt_bogey_att"] = int(out["gir_made"])
+    out["three_putt_bogey_pct"] = _pct(three_putt_bogeys, out["three_putt_bogey_att"])
 
     # Pro Pars+
     pro_cols = [c for c in ["Pro Par", "Pro Birdie", "Pro Eagle+"] if c in b.columns]
@@ -372,7 +386,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["fw4"] = _fw_by_par(4)
     out["fw5"] = _fw_by_par(5)
 
-    # ✅ NEW: GIR from Fairway by hole type (Par 4/5 only)
+    # GIR from Fairway by hole type (Par 4/5 only)
     def _gir_from_fw_by_par(p):
         block = b[b["Par"] == p]
         if block.empty:
@@ -444,7 +458,7 @@ def render_summary_cards(summary: dict, title="📦 Current Slice — Summary"):
     d4.metric(
         "3P Bogeys",
         f'{summary["three_putt_bogey_pct"]:.1f}%',
-        delta=f'{int(summary["three_putt_bogeys"]):,}/{int(summary["holes_played"]):,}',
+        delta=f'{int(summary["three_putt_bogeys"]):,}/{int(summary.get("three_putt_bogey_att", summary["gir_made"])):,}',
     )
     d5.metric(
         "Lost Balls",
@@ -674,7 +688,8 @@ def _build_player_compare_table(frame: pd.DataFrame, selected_players: list) -> 
             "3+P": f'{int(s["three_plus_putts"])}/{int(s["holes_played"])}',
             "3+P%": float(s["three_plus_putt_pct"]),
 
-            "3P Bogey": f'{int(s["three_putt_bogeys"])}/{int(s["holes_played"])}',
+            # ✅ denominator = GIR hits
+            "3P Bogey": f'{int(s["three_putt_bogeys"])}/{int(s.get("three_putt_bogey_att", s["gir_made"]))}',
             "3P Bogey%": float(s["three_putt_bogey_pct"]),
 
             "Lost Balls": int(s["lb_total"]),
