@@ -159,7 +159,7 @@ for col in [
     df[col] = _as_int(df[col], 0)
 
 # =========================
-# Filters (Sidebar)
+# Filters (Sidebar) — MULTISELECT for Player/Course/Year/Month
 # =========================
 st.sidebar.header("🔍 Filters (build your slice)")
 
@@ -168,10 +168,11 @@ courses = sorted([x for x in df["Course Name"].dropna().unique().tolist() if str
 years = sorted([int(x) for x in df["Year"].dropna().unique().tolist()], reverse=True)
 months = [datetime.date(2000, i, 1).strftime("%B") for i in range(1, 13)]
 
-sel_player = st.sidebar.selectbox("Player (single-player views)", ["All"] + players, index=0)
-sel_course = st.sidebar.selectbox("Course", ["All"] + courses, index=0)
-sel_year = st.sidebar.selectbox("Year", ["All"] + years, index=0)
-sel_month = st.sidebar.selectbox("Month", ["All"] + months, index=0)
+# ✅ Multi-selects (empty = All)
+sel_players = st.sidebar.multiselect("Players", players, default=[])
+sel_courses = st.sidebar.multiselect("Courses", courses, default=[])
+sel_years = st.sidebar.multiselect("Years", years, default=[])
+sel_months = st.sidebar.multiselect("Months", months, default=[])
 
 sel_pars = st.sidebar.multiselect("Par", [3, 4, 5], default=[3, 4, 5])
 
@@ -199,16 +200,17 @@ y_low, y_high = st.sidebar.slider(
 )
 
 # =========================
-# Apply filters -> base slice (NO player filter)
+# Apply filters -> base slice (NO player filter for compare)
 # =========================
 base_f = df.copy()
 
-if sel_course != "All":
-    base_f = base_f[base_f["Course Name"] == sel_course]
-if sel_year != "All":
-    base_f = base_f[base_f["Year"] == int(sel_year)]
-if sel_month != "All":
-    base_f = base_f[base_f["Month"] == sel_month]
+# ✅ Apply multi-filters (empty list means "All")
+if sel_courses:
+    base_f = base_f[base_f["Course Name"].isin(sel_courses)]
+if sel_years:
+    base_f = base_f[base_f["Year"].isin([int(x) for x in sel_years])]
+if sel_months:
+    base_f = base_f[base_f["Month"].isin(sel_months)]
 if sel_pars:
     base_f = base_f[base_f["Par"].isin(sel_pars)]
 if sel_clubs:
@@ -233,10 +235,19 @@ if sel_appr_gir != "All":
 yard_n_base = _num(base_f.get(YARD_COL), default=pd.NA)
 base_f = base_f[(yard_n_base.isna()) | ((yard_n_base >= y_low) & (yard_n_base <= y_high))].copy()
 
-# Now apply the single-player filter for existing views
+# =========================
+# Single-slice frame (f)
+# - For single-player modes, we still need a single "selected player"
+#   but now it should be derived from sel_players:
+#     - if exactly 1 selected: use it
+#     - if 0 selected: treat as All (no filter)
+#     - if 2+ selected: keep them in slice (no forced single)
+# =========================
 f = base_f.copy()
-if sel_player != "All":
-    f = f[f["Player Name"] == sel_player]
+
+# If user selected players, filter the slice to those players
+if sel_players:
+    f = f[f["Player Name"].isin(sel_players)]
 
 if f.empty:
     st.warning("No rows match your filters.")
@@ -1056,8 +1067,9 @@ elif mode == "🎯 Hole Scorecard (last 18 for a specific hole)":
         h = h[h["Course Name"] == hole_course]
     h = h[h["Hole"] == int(hole_num)].copy()
 
-    if sel_player != "All":
-        h = h[h["Player Name"] == sel_player]
+    # If user selected players, filter hole view to them
+    if sel_players:
+        h = h[h["Player Name"].isin(sel_players)]
 
     h = h.sort_values("Date Played", ascending=False).head(18).copy()
     if h.empty:
@@ -1078,19 +1090,22 @@ elif mode == "🎯 Hole Scorecard (last 18 for a specific hole)":
 elif mode == "👥 Player Comparison (same slice)":
     st.caption(f"Rows in slice (all players): {base_f.shape[0]:,}")
 
+    # If sidebar Players multi-select is set, use that as the default compare list.
     all_players_in_slice = sorted([x for x in base_f["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_players = st.multiselect(
+    default_compare = sel_players[:4] if sel_players else (all_players_in_slice[:2] if len(all_players_in_slice) >= 2 else all_players_in_slice)
+
+    sel_players_cmp = st.multiselect(
         "Select players to compare (up to 4)",
         options=all_players_in_slice,
-        default=all_players_in_slice[:2] if len(all_players_in_slice) >= 2 else all_players_in_slice,
+        default=default_compare,
         max_selections=4
     )
 
-    if len(sel_players) < 2:
+    if len(sel_players_cmp) < 2:
         st.info("Pick at least 2 players to compare.")
         st.stop()
 
-    dfc = _build_player_compare_table(base_f, sel_players)
+    dfc = _build_player_compare_table(base_f, sel_players_cmp)
     if dfc.empty:
         st.warning("No data for selected players in this slice.")
         st.stop()
