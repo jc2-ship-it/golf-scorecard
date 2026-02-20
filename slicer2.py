@@ -4,15 +4,20 @@
 # - Slice summary (totals + score mix w/ counts + category mix)
 # - Player comparison (2–4 players) with:
 #     - Avg / 72 (par72 projection)
-#     - clean rounding (no “all the digits”)
+#     - clean rounding
 #     - counts + % side-by-side (GIR, FW, GIR-from-FW, Scr, U&D, 1-putts, 3+ putts, 3P bogeys)
 #     - best-stat highlighting
 #     - badge row (🥇/🥈/🥉 per stat)
 #     - rank leaderboard
 #     - quick charts
+# - Leaderboard Dashboard (all players in slice) with:
+#     - ✅ on-dashboard Player picker (so it "feels filterable" without needing Golf Trip)
+#     - multi-stat mini leaderboards (Qty + % where relevant)
 # - Adds: GIR from Fairway by Hole Type (Par 4/5)
-# - Robust numeric parsing (prevents pd.to_numeric DataFrame TypeError)
-# - Windows-safe date formatting (no %-m / %-d)
+# - Robust numeric parsing
+# - Windows-safe date formatting
+# - Filter by "Golf Trip"
+# - ✅ Putts: Total Putts + Putts/Hole + Putts/18 (summary + compare + leaderboard)
 
 import pandas as pd
 import streamlit as st
@@ -24,12 +29,13 @@ import altair as alt
 # =========================
 st.set_page_config(page_title="Golf Slicer", layout="wide")
 
-CSV_FILE = "Hole Data-Grid view (18).csv"  # keep name if you run from same folder
+CSV_FILE = "Hole Data-Grid view (18).csv"
 
 PROX_COL = "Proximity to Hole - How far is your First Putt (FT)"
 YARD_COL = "Approach Shot Distance (how far you had to the hole)"
 CLUB_COL = "Approach Shot Club Used"
 FEET_MADE_COL = "Feet of Putt Made (How far was the putt you made)"
+GOLF_TRIP_COL = "Golf Trip"
 
 NEEDED_COLS = [
     "Date Played", "Player Name", "Course Name", "Round Link", "Hole", "Par", "Yards",
@@ -41,6 +47,7 @@ NEEDED_COLS = [
     "3 Putt Bogey",
     "Pro Par", "Pro Birdie", "Pro Eagle+",
     "Approach Shot Direction Miss",
+    GOLF_TRIP_COL,
     CLUB_COL, YARD_COL, PROX_COL, FEET_MADE_COL
 ]
 
@@ -159,7 +166,7 @@ for col in [
     df[col] = _as_int(df[col], 0)
 
 # =========================
-# Filters (Sidebar) — MULTISELECT for Player/Course/Year/Month
+# Filters (Sidebar)
 # =========================
 st.sidebar.header("🔍 Filters (build your slice)")
 
@@ -168,7 +175,9 @@ courses = sorted([x for x in df["Course Name"].dropna().unique().tolist() if str
 years = sorted([int(x) for x in df["Year"].dropna().unique().tolist()], reverse=True)
 months = [datetime.date(2000, i, 1).strftime("%B") for i in range(1, 13)]
 
-# ✅ Multi-selects (empty = All)
+golf_trips = sorted([x for x in df[GOLF_TRIP_COL].dropna().unique().tolist() if str(x).strip() != ""])
+sel_trips = st.sidebar.multiselect("Golf Trip", golf_trips, default=[])
+
 sel_players = st.sidebar.multiselect("Players", players, default=[])
 sel_courses = st.sidebar.multiselect("Courses", courses, default=[])
 sel_years = st.sidebar.multiselect("Years", years, default=[])
@@ -179,16 +188,13 @@ sel_pars = st.sidebar.multiselect("Par", [3, 4, 5], default=[3, 4, 5])
 clubs = sorted([x for x in df[CLUB_COL].dropna().unique().tolist() if str(x).strip() != ""])
 sel_clubs = st.sidebar.multiselect("Approach Club", clubs, default=[])
 
-# ✅ Fairway filter (before GIR)
 sel_fw = st.sidebar.selectbox("Fairway (P4/P5 only)", ["All", "Yes", "No"], index=0)
-
 sel_gir = st.sidebar.selectbox("GIR", ["All", "Yes", "No"], index=0)
 sel_appr_gir = st.sidebar.selectbox("Approach GIR", ["All", "Yes", "No"], index=0)
 
 holes = sorted([int(x) for x in df["Hole"].dropna().unique().tolist() if int(x) > 0])
 sel_holes = st.sidebar.multiselect("Hole Number", holes, default=[])
 
-# Yard slider (keeps blank yardage rows)
 yard_series = _num(df.get(YARD_COL), default=pd.NA).dropna()
 y_min = int(yard_series.min()) if not yard_series.empty else 0
 y_max = int(yard_series.max()) if not yard_series.empty else 300
@@ -200,11 +206,13 @@ y_low, y_high = st.sidebar.slider(
 )
 
 # =========================
-# Apply filters -> base slice (NO player filter for compare)
+# Apply filters -> base slice (NO player filter for compare/leaderboard by default)
 # =========================
 base_f = df.copy()
 
-# ✅ Apply multi-filters (empty list means "All")
+if sel_trips:
+    base_f = base_f[base_f[GOLF_TRIP_COL].isin(sel_trips)]
+
 if sel_courses:
     base_f = base_f[base_f["Course Name"].isin(sel_courses)]
 if sel_years:
@@ -218,12 +226,11 @@ if sel_clubs:
 if sel_holes:
     base_f = base_f[base_f["Hole"].isin(sel_holes)]
 
-# ✅ Fairway filter (only meaningful on Par 4/5; keep Par 3s in slice)
 if sel_fw != "All":
     p45_mask = base_f["Par"].isin([4, 5])
     if sel_fw == "Yes":
         base_f = base_f[~p45_mask | (base_f["Fairway"] == 1)]
-    else:  # "No"
+    else:
         base_f = base_f[~p45_mask | (base_f["Fairway"] == 0)]
 
 if sel_gir != "All":
@@ -231,21 +238,13 @@ if sel_gir != "All":
 if sel_appr_gir != "All":
     base_f = base_f[base_f["Approach GIR"] == sel_appr_gir]
 
-# Yard filter: keep blanks
 yard_n_base = _num(base_f.get(YARD_COL), default=pd.NA)
 base_f = base_f[(yard_n_base.isna()) | ((yard_n_base >= y_low) & (yard_n_base <= y_high))].copy()
 
 # =========================
-# Single-slice frame (f)
-# - For single-player modes, we still need a single "selected player"
-#   but now it should be derived from sel_players:
-#     - if exactly 1 selected: use it
-#     - if 0 selected: treat as All (no filter)
-#     - if 2+ selected: keep them in slice (no forced single)
+# Single-slice frame (f) = base + optional sidebar Player filter
 # =========================
 f = base_f.copy()
-
-# If user selected players, filter the slice to those players
 if sel_players:
     f = f[f["Player Name"].isin(sel_players)]
 
@@ -265,7 +264,8 @@ mode = st.radio(
         "📦 Slice Summary (Any View)",
         "🧾 Round Scorecard (by Round Link)",
         "🎯 Hole Scorecard (last 18 for a specific hole)",
-        "👥 Player Comparison (same slice)"
+        "👥 Player Comparison (same slice)",
+        "🏆 Leaderboard Dashboard (multi-stat)"
     ],
     horizontal=True
 )
@@ -287,6 +287,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     putts_total = int(_num(b["Putts"], 0).sum())
     out["putts_total"] = putts_total
     out["putts_per_hole"] = (putts_total / holes_played) if holes_played else 0.0
+    out["putts_per_18"] = out["putts_per_hole"] * 18.0
 
     # Fairways: only par 4/5 attempts
     p45 = b[b["Par"].isin([4, 5])]
@@ -296,13 +297,13 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["fw_att"] = fw_att
     out["fw_pct"] = _pct(fw_made, fw_att)
 
-    # GIR overall (Yes count)
+    # GIR overall
     gir_made = int((b["GIR"] == "Yes").sum())
     out["gir_made"] = gir_made
     out["gir_att"] = holes_played
     out["gir_pct"] = _pct(gir_made, holes_played)
 
-    # GIR from Fairway (Par 4/5 only): attempts = FW hit, makes = GIR Yes
+    # GIR from Fairway (P4/P5 only)
     p45_fw = p45[p45["Fairway"] == 1]
     fw_gir_att = int(p45_fw.shape[0])
     fw_gir_made = int((p45_fw["GIR"] == "Yes").sum())
@@ -310,14 +311,14 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["fw_gir_att"] = fw_gir_att
     out["fw_gir_pct"] = _pct(fw_gir_made, fw_gir_att)
 
-    # Scrambles / Up&Downs
+    # Scrambles
     scr_made = int(_num(b.get("Scramble", 0), 0).sum())
     scr_ops = int(_num(b.get("Scramble Opportunity", 0), 0).sum())
     out["scr_made"] = scr_made
     out["scr_ops"] = scr_ops
     out["scr_pct"] = _pct(scr_made, scr_ops)
 
-    # Up & downs = no GIR + 1 putt; ops = scramble opps
+    # Up & Downs = no GIR + 1 putt; ops = scramble opps
     gir_yes = (b["GIR"] == "Yes")
     putt1 = (_as_int(b["Putts"], 0) == 1)
     up_made = int((~gir_yes & putt1).sum())
@@ -332,7 +333,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["lb_appr"] = lb_appr
     out["lb_total"] = lb_tee + lb_appr
 
-    # One-putts / 3+
+    # 1-putts / 3+
     one_putts = int((_as_int(b["Putts"], 0) == 1).sum())
     out["one_putts"] = one_putts
     out["one_putt_pct"] = _pct(one_putts, holes_played)
@@ -341,7 +342,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["three_plus_putts"] = three_plus_putts
     out["three_plus_putt_pct"] = _pct(three_plus_putts, holes_played)
 
-    # ✅ 3 Putt Bogey %: attempts should be GIR hits (not holes played)
+    # 3 Putt Bogey %: attempts = GIR hits
     three_putt_bogeys = int(_num(b.get("3 Putt Bogey", 0), 0).sum())
     out["three_putt_bogeys"] = three_putt_bogeys
     out["three_putt_bogey_att"] = int(out["gir_made"])
@@ -367,7 +368,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["avg_p4"] = _avg_for_par(4)
     out["avg_p5"] = _avg_for_par(5)
 
-    # Par 72 projection (typical: 4x Par 3, 10x Par 4, 4x Par 5)
+    # Par 72 projection
     if out["avg_p3"] is not None and out["avg_p4"] is not None and out["avg_p5"] is not None:
         par72_score = (out["avg_p3"] * 4) + (out["avg_p4"] * 10) + (out["avg_p5"] * 4)
         out["par72_score"] = float(par72_score)
@@ -397,7 +398,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     out["fw4"] = _fw_by_par(4)
     out["fw5"] = _fw_by_par(5)
 
-    # GIR from Fairway by hole type (Par 4/5 only)
+    # GIR from FW by hole type (P4/P5 only)
     def _gir_from_fw_by_par(p):
         block = b[b["Par"] == p]
         if block.empty:
@@ -413,7 +414,7 @@ def build_summary(b: pd.DataFrame) -> dict:
     return out
 
 # =========================
-# Summary cards (single slice / round / hole)
+# Summary cards
 # =========================
 def render_summary_cards(summary: dict, title="📦 Current Slice — Summary"):
     st.subheader(title)
@@ -427,8 +428,11 @@ def render_summary_cards(summary: dict, title="📦 Current Slice — Summary"):
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Holes", _cnt(summary["holes_played"]))
     c2.metric("Score", f'{_cnt(summary["score_total"])} ({_fmt_to_par(summary["to_par"])})')
-    c3.metric("Putts/Hole", f'{summary["putts_per_hole"]:.2f}')
-
+    c3.metric(
+        "Putts",
+        _cnt(summary["putts_total"]),
+        delta=f'{summary["putts_per_hole"]:.2f}/hole • {summary["putts_per_18"]:.1f}/18',
+    )
     c4.metric(
         "GIR",
         f'{summary["gir_pct"]:.1f}% {_emoji(summary["gir_pct"])}',
@@ -660,7 +664,7 @@ def render_score_mix(b: pd.DataFrame, title="📊 Score Mix — Current Slice"):
     st.caption(cat_line)
 
 # =========================
-# Player Comparison (2–4 players) — with counts + % columns + clean formatting
+# Player Comparison table builder
 # =========================
 def _build_player_compare_table(frame: pd.DataFrame, selected_players: list) -> pd.DataFrame:
     rows = []
@@ -676,7 +680,10 @@ def _build_player_compare_table(frame: pd.DataFrame, selected_players: list) -> 
             "Player": p,
 
             "Avg / 72": (None if s.get("par72_score") is None else float(s["par72_score"])),
+
+            "Putts": int(s["putts_total"]),
             "Putts/Hole": float(s["putts_per_hole"]),
+            "Putts/18": float(s["putts_per_18"]),
 
             "GIR": _cnt_pair(s["gir_made"], s["gir_att"]),
             "GIR%": float(s["gir_pct"]),
@@ -699,7 +706,6 @@ def _build_player_compare_table(frame: pd.DataFrame, selected_players: list) -> 
             "3+P": f'{int(s["three_plus_putts"])}/{int(s["holes_played"])}',
             "3+P%": float(s["three_plus_putt_pct"]),
 
-            # ✅ denominator = GIR hits
             "3P Bogey": f'{int(s["three_putt_bogeys"])}/{int(s.get("three_putt_bogey_att", s["gir_made"]))}',
             "3P Bogey%": float(s["three_putt_bogey_pct"]),
 
@@ -716,17 +722,18 @@ def _build_player_compare_table(frame: pd.DataFrame, selected_players: list) -> 
 
     cols = [
         "Holes","Player",
-        "Avg / 72","Putts/Hole",
+        "Avg / 72",
+        "Putts","Putts/Hole","Putts/18",
         "GIR","GIR%","FW","FW%","GIR|FW","GIR|FW%",
         "Scr","Scr%","U&D","U&D%","1P","1P%","3+P","3+P%","3P Bogey","3P Bogey%",
         "Lost Balls","Pro Pars+","Arnies","Seves","Hole Outs"
     ]
     dfc = dfc[cols].copy()
 
-    for c in ["Avg / 72"]:
-        dfc[c] = pd.to_numeric(dfc[c], errors="coerce").round(1)
-    for c in ["Putts/Hole"]:
-        dfc[c] = pd.to_numeric(dfc[c], errors="coerce").round(2)
+    dfc["Avg / 72"] = pd.to_numeric(dfc["Avg / 72"], errors="coerce").round(1)
+    dfc["Putts/Hole"] = pd.to_numeric(dfc["Putts/Hole"], errors="coerce").round(2)
+    dfc["Putts/18"] = pd.to_numeric(dfc["Putts/18"], errors="coerce").round(1)
+
     for c in ["GIR%","FW%","GIR|FW%","Scr%","U&D%","1P%","3+P%","3P Bogey%"]:
         dfc[c] = pd.to_numeric(dfc[c], errors="coerce").round(1)
 
@@ -737,7 +744,8 @@ def _style_compare(dfc: pd.DataFrame):
         return dfc
 
     hi_good = {"GIR%","FW%","GIR|FW%","Scr%","U&D%","1P%","Pro Pars+","Arnies","Seves","Hole Outs"}
-    lo_good = {"Avg / 72","Putts/Hole","Lost Balls","3+P%","3P Bogey%"}  # lower is better
+    # (total Putts is still shown, but for "best" highlight we normalize: Putts/Hole + Putts/18)
+    lo_good = {"Avg / 72","Putts/Hole","Putts/18","Lost Balls","3+P%","3P Bogey%"}  # lower is better
 
     def _highlight(col):
         if col.name in hi_good:
@@ -755,6 +763,7 @@ def _style_compare(dfc: pd.DataFrame):
     fmt = {
         "Avg / 72": "{:.1f}",
         "Putts/Hole": "{:.2f}",
+        "Putts/18": "{:.1f}",
         "GIR%": "{:.1f}",
         "FW%": "{:.1f}",
         "GIR|FW%": "{:.1f}",
@@ -771,7 +780,8 @@ def _rank_leaderboard(dfc: pd.DataFrame) -> pd.DataFrame:
         return dfc
 
     hi_good = ["GIR%","FW%","GIR|FW%","Scr%","U&D%","1P%","Pro Pars+","Arnies","Seves","Hole Outs"]
-    lo_good = ["Avg / 72","Putts/Hole","Lost Balls","3+P%","3P Bogey%"]
+    # Keep ranking normalized (not raw total putts)
+    lo_good = ["Avg / 72","Putts/Hole","Putts/18","Lost Balls","3+P%","3P Bogey%"]
 
     work = dfc.set_index("Player").copy()
 
@@ -795,7 +805,7 @@ def _award_badges(dfc: pd.DataFrame) -> pd.DataFrame:
         return dfc
 
     hi_good = {"GIR%","FW%","GIR|FW%","Scr%","U&D%","1P%","Pro Pars+","Arnies","Seves","Hole Outs"}
-    lo_good = {"Avg / 72","Putts/Hole","Lost Balls","3+P%","3P Bogey%"}  # lower is better
+    lo_good = {"Avg / 72","Putts/Hole","Putts/18","Lost Balls","3+P%","3P Bogey%"}  # lower is better
 
     out = {"Player": "Badges"}
     out["Holes"] = ""
@@ -852,7 +862,93 @@ def _compare_chart(dfc: pd.DataFrame, metric: str):
     st.altair_chart(chart, use_container_width=True)
 
 # =========================
-# Round display helpers (clean names)
+# Leaderboard Dashboard helpers
+# =========================
+def build_player_stats_for_slice(frame: pd.DataFrame) -> pd.DataFrame:
+    players_in_slice = sorted([x for x in frame["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
+    if not players_in_slice:
+        return pd.DataFrame()
+    return _build_player_compare_table(frame, players_in_slice)
+
+def render_mini_leaderboards(dfc: pd.DataFrame, top_n: int = 6):
+    """
+    Shows Qty + % for percent metrics (e.g., GIR: 102/283 + 36.0%)
+    """
+    if dfc.empty:
+        st.info("No player stats for this slice.")
+        return
+
+    qty_map = {
+        "GIR%": "GIR",
+        "FW%": "FW",
+        "GIR|FW%": "GIR|FW",
+        "Scr%": "Scr",
+        "U&D%": "U&D",
+        "1P%": "1P",
+        "3+P%": "3+P",
+        "3P Bogey%": "3P Bogey",
+    }
+
+    metrics = [
+        ("Avg / 72", False, "{:.1f}"),
+        ("Putts/Hole", False, "{:.2f}"),
+        ("Putts/18", False, "{:.1f}"),
+        ("Putts", False, "{:.0f}"),
+        ("GIR%", True, "{:.1f}%"),
+        ("FW%", True, "{:.1f}%"),
+        ("GIR|FW%", True, "{:.1f}%"),
+        ("Scr%", True, "{:.1f}%"),
+        ("U&D%", True, "{:.1f}%"),
+        ("1P%", True, "{:.1f}%"),
+        ("3+P%", False, "{:.1f}%"),
+        ("3P Bogey%", False, "{:.1f}%"),
+        ("Lost Balls", False, "{:.0f}"),
+        ("Pro Pars+", True, "{:.0f}"),
+        ("Arnies", True, "{:.0f}"),
+        ("Seves", True, "{:.0f}"),
+        ("Hole Outs", True, "{:.0f}"),
+    ]
+    metrics = [(m, hib, fmt) for (m, hib, fmt) in metrics if m in dfc.columns]
+
+    def _fmt(v, fmt):
+        if pd.isna(v):
+            return "—"
+        try:
+            return fmt.format(float(v))
+        except:
+            return str(v)
+
+    per_row = 3
+    for i in range(0, len(metrics), per_row):
+        cols = st.columns(per_row)
+        for j, (metric, higher_better, fmt) in enumerate(metrics[i:i + per_row]):
+            with cols[j]:
+                st.markdown(f"**{metric}**")
+
+                show_cols = ["Player", metric]
+                qty_col = qty_map.get(metric)
+                if qty_col and qty_col in dfc.columns:
+                    show_cols.insert(1, qty_col)  # Player, Qty, Metric
+
+                t = dfc[show_cols].copy()
+                t[metric] = pd.to_numeric(t[metric], errors="coerce")
+                t = t.dropna(subset=[metric]).sort_values(metric, ascending=not higher_better).head(top_n)
+
+                if t.empty:
+                    st.caption("No data.")
+                    continue
+
+                t["Rank"] = range(1, len(t) + 1)
+                t["Value"] = t[metric].apply(lambda v: _fmt(v, fmt))
+
+                if qty_col and qty_col in t.columns:
+                    t = t.rename(columns={qty_col: "Qty"})
+                    st.dataframe(t[["Rank", "Player", "Qty", "Value"]], hide_index=True, use_container_width=True)
+                else:
+                    st.dataframe(t[["Rank", "Player", "Value"]], hide_index=True, use_container_width=True)
+
+# =========================
+# Round display helpers
 # =========================
 def _round_display_options(frame: pd.DataFrame):
     meta = (
@@ -1017,7 +1113,7 @@ if mode == "📦 Slice Summary (Any View)":
 
     with st.expander("Show slice rows (preview)", expanded=False):
         show_cols = [c for c in [
-            "Date Played", "Player Name", "Course Name", "Round Link", "Hole", "Par", "Hole Score", "Putts",
+            "Date Played", "Player Name", "Course Name", GOLF_TRIP_COL, "Round Link", "Hole", "Par", "Hole Score", "Putts",
             "Fairway", "GIR", "Approach GIR", "Score Label", CLUB_COL, YARD_COL
         ] if c in slice_for_summary.columns]
         st.dataframe(
@@ -1067,9 +1163,10 @@ elif mode == "🎯 Hole Scorecard (last 18 for a specific hole)":
         h = h[h["Course Name"] == hole_course]
     h = h[h["Hole"] == int(hole_num)].copy()
 
-    # If user selected players, filter hole view to them
     if sel_players:
         h = h[h["Player Name"].isin(sel_players)]
+    if sel_trips:
+        h = h[h[GOLF_TRIP_COL].isin(sel_trips)]
 
     h = h.sort_values("Date Played", ascending=False).head(18).copy()
     if h.empty:
@@ -1078,7 +1175,7 @@ elif mode == "🎯 Hole Scorecard (last 18 for a specific hole)":
 
     st.subheader(f"🎯 Hole {hole_num} — Last {h.shape[0]} Results")
     show_cols = [c for c in [
-        "Date Played", "Player Name", "Course Name", "Round Link", "Hole", "Par", "Hole Score", "Putts",
+        "Date Played", "Player Name", "Course Name", GOLF_TRIP_COL, "Round Link", "Hole", "Par", "Hole Score", "Putts",
         "Fairway", "GIR", "Approach GIR", "Score Label", CLUB_COL, YARD_COL, PROX_COL
     ] if c in h.columns]
     st.dataframe(h[show_cols], use_container_width=True, hide_index=True)
@@ -1090,7 +1187,6 @@ elif mode == "🎯 Hole Scorecard (last 18 for a specific hole)":
 elif mode == "👥 Player Comparison (same slice)":
     st.caption(f"Rows in slice (all players): {base_f.shape[0]:,}")
 
-    # If sidebar Players multi-select is set, use that as the default compare list.
     all_players_in_slice = sorted([x for x in base_f["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
     default_compare = sel_players[:4] if sel_players else (all_players_in_slice[:2] if len(all_players_in_slice) >= 2 else all_players_in_slice)
 
@@ -1127,6 +1223,8 @@ elif mode == "👥 Player Comparison (same slice)":
         chart_metrics = [
             "Avg / 72",
             "Putts/Hole",
+            "Putts/18",
+            "Putts",
             "GIR%",
             "FW%",
             "GIR|FW%",
@@ -1139,3 +1237,38 @@ elif mode == "👥 Player Comparison (same slice)":
         ]
         metric = st.selectbox("Pick a metric to chart", [m for m in chart_metrics if m in dfc.columns], index=0)
         _compare_chart(dfc, metric)
+
+elif mode == "🏆 Leaderboard Dashboard (multi-stat)":
+    st.caption(f"Rows in slice (all players): {base_f.shape[0]:,}")
+    st.caption("Tip: All filters are in the left sidebar. The player picker below is an extra ‘dashboard filter’ for the leaderboards.")
+
+    top_n = st.slider("Show Top N per leaderboard", 3, 15, 6)
+
+    # ✅ on-dashboard player filter (works even if Golf Trip is empty)
+    dash_players = sorted([x for x in base_f["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
+    dash_default = sel_players if sel_players else dash_players
+    sel_dash_players = st.multiselect(
+        "Dashboard Players (optional)",
+        options=dash_players,
+        default=dash_default
+    )
+
+    dash_frame = base_f.copy()
+    if sel_dash_players:
+        dash_frame = dash_frame[dash_frame["Player Name"].isin(sel_dash_players)].copy()
+
+    dfc_all = build_player_stats_for_slice(dash_frame)
+    if dfc_all.empty:
+        st.warning("No players found in this slice.")
+        st.stop()
+
+    st.subheader("🏆 Overall Leaderboard (sum of ranks across stats)")
+    ranks_all = _rank_leaderboard(dfc_all)
+    st.dataframe(ranks_all, use_container_width=True, hide_index=True)
+    st.caption("Lower Total Rank Pts = better overall across the included stats.")
+
+    st.subheader("📌 Quick Stat Leaderboards (top lists)")
+    render_mini_leaderboards(dfc_all, top_n=top_n)
+
+    with st.expander("Show full player comparison table (all dashboard players)", expanded=False):
+        st.dataframe(_style_compare(dfc_all), use_container_width=True, hide_index=True)
