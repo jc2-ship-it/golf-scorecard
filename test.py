@@ -1144,8 +1144,6 @@ def _stacked_score_mix_by_player(frame: pd.DataFrame, players_list: list):
 # NEW: Approach Analytics helpers (GIR only)
 # =========================
 def _distance_buckets_standard():
-    # Trip-friendly & readable
-    # Label, low inclusive, high inclusive (None = open-ended)
     return [
         ("0–49", 0, 49),
         ("50–74", 50, 74),
@@ -1169,7 +1167,6 @@ def _bucketize_distance(y: pd.Series, buckets):
     return out
 
 def _bucket_mid(label: str):
-    # for plotting order on line chart
     if label.endswith("+"):
         try:
             return float(label.replace("+", ""))
@@ -1209,7 +1206,6 @@ def build_gir_by_distance(frame: pd.DataFrame, min_attempts: int = 1) -> pd.Data
     g["Label"] = g["Qty"] + " • " + g["GIR%"].round(1).astype(str) + "%"
     g["Mid"] = g["Dist Bucket"].astype(str).apply(_bucket_mid)
 
-    # keep bucket order
     order = [x[0] for x in buckets]
     g["Dist Bucket"] = pd.Categorical(g["Dist Bucket"], categories=order, ordered=True)
     g = g.sort_values("Dist Bucket").reset_index(drop=True)
@@ -1246,7 +1242,6 @@ def build_gir_by_club(frame: pd.DataFrame, min_attempts: int = 1) -> pd.DataFram
     return g
 
 def build_gir_heatmap_distance_x_club(frame: pd.DataFrame, min_cell_attempts: int = 3) -> pd.DataFrame:
-    # "Best of both worlds": where BOTH club + distance exist
     if frame.empty or CLUB_COL not in frame.columns or YARD_COL not in frame.columns:
         return pd.DataFrame()
 
@@ -1287,8 +1282,10 @@ def _line_chart_distance_gir(g: pd.DataFrame):
         st.caption("No distance data for GIR.")
         return
 
+    bucket_order = [x[0] for x in _distance_buckets_standard()]
+
     base = alt.Chart(g).encode(
-        x=alt.X("Dist Bucket:N", sort=[str(x) for x in g["Dist Bucket"].tolist()], title="Approach Distance Bucket"),
+        x=alt.X("Dist Bucket:N", sort=bucket_order, title="Approach Distance Bucket"),
         y=alt.Y("GIR%:Q", title="GIR %"),
         tooltip=[
             alt.Tooltip("Dist Bucket:N", title="Bucket"),
@@ -1342,7 +1339,6 @@ def _heatmap_distance_x_club(g: pd.DataFrame):
         st.caption("No rows where both Distance + Club exist (or cell min attempts is too high).")
         return
 
-    # Keep chart readable: show clubs sorted by overall attempts in heatmap data
     club_order = (
         g.groupby("Club")["Attempts"].sum()
         .sort_values(ascending=False)
@@ -1353,7 +1349,7 @@ def _heatmap_distance_x_club(g: pd.DataFrame):
         alt.Chart(g)
         .mark_rect()
         .encode(
-            x=alt.X("Dist Bucket:N", title="Distance Bucket"),
+            x=alt.X("Dist Bucket:N", title="Distance Bucket", sort=[x[0] for x in _distance_buckets_standard()]),
             y=alt.Y("Club:N", sort=club_order, title="Club"),
             color=alt.Color("GIR%:Q", title="GIR %"),
             tooltip=[
@@ -1370,12 +1366,6 @@ def _heatmap_distance_x_club(g: pd.DataFrame):
     st.altair_chart(ch, use_container_width=True)
 
 def build_approach_reference_table(frame: pd.DataFrame) -> pd.DataFrame:
-    """
-    Quick grounding block for Approach Analytics tab:
-    - Overall GIR
-    - GIR by Par 3/4/5
-    - GIR by Fairway hit (Par 4/5 only): FW=Yes and FW=No
-    """
     if frame.empty:
         return pd.DataFrame()
 
@@ -2073,7 +2063,6 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
     # ✅ Quick Reference / Grounding block
     st.markdown("<div class='section-h'>Quick Reference — GIR Grounding</div>", unsafe_allow_html=True)
     ref = build_approach_reference_table(a_frame)
-    # show with clean 1-decimal percent formatting (33.5%)
     ref_view = ref[["Split", "GIR", "GIR%", "Attempts"]].copy()
     st.dataframe(_style_pct_table(ref_view, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
 
@@ -2096,13 +2085,40 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Distance buckets**")
-            dtab = dist_g[["Dist Bucket","Qty","GIR%","Attempts"]].copy()
+            dtab = dist_g[["Dist Bucket","Qty","GIR%","Attempts"]].copy() if not dist_g.empty else pd.DataFrame()
             st.dataframe(_style_pct_table(dtab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
         with c2:
             st.markdown("**Clubs**")
-            ctab = club_g[["Club","Qty","GIR%","Attempts"]].head(top_clubs).copy()
+            ctab = club_g[["Club","Qty","GIR%","Attempts"]].head(top_clubs).copy() if not club_g.empty else pd.DataFrame()
             st.dataframe(_style_pct_table(ctab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
 
         st.markdown("**Heatmap cells**")
-        htab = heat[["Dist Bucket","Club","Qty","GIR%","Attempts"]].copy()
+        htab = heat[["Dist Bucket","Club","Qty","GIR%","Attempts"]].copy() if not heat.empty else pd.DataFrame()
         st.dataframe(_style_pct_table(htab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
+
+    with st.expander("📤 Export Approach tables (CSV)", expanded=False):
+        colA, colB, colC = st.columns(3)
+        with colA:
+            st.download_button(
+                "Download Distance Buckets (CSV)",
+                data=(dist_g.to_csv(index=False) if not dist_g.empty else "Dist Bucket,Attempts,GIR_Made,GIR%,Qty,Label,Mid\n"),
+                file_name="approach_gir_by_distance.csv",
+                mime="text/csv",
+            )
+        with colB:
+            st.download_button(
+                "Download Clubs (CSV)",
+                data=(club_g.to_csv(index=False) if not club_g.empty else "Club,Attempts,GIR_Made,GIR%,Qty,Label\n"),
+                file_name="approach_gir_by_club.csv",
+                mime="text/csv",
+            )
+        with colC:
+            st.download_button(
+                "Download Heatmap Cells (CSV)",
+                data=(heat.to_csv(index=False) if not heat.empty else "Dist Bucket,Club,Attempts,GIR_Made,GIR%,Qty\n"),
+                file_name="approach_gir_heatmap_cells.csv",
+                mime="text/csv",
+            )
+
+else:
+    st.warning("Unknown mode selection.")
