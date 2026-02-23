@@ -89,6 +89,72 @@ st.markdown(
     letter-spacing: .2px;
   }
   .muted {opacity: .82;}
+
+  .hero {
+    padding: 16px 16px 12px 16px;
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+    box-shadow: 0 12px 28px rgba(0,0,0,.22);
+    margin-top: 10px;
+    margin-bottom: 10px;
+  }
+  .hero-top {
+    display:flex;
+    justify-content: space-between;
+    align-items:flex-end;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .hero-title {
+    font-size: 1.25rem;
+    font-weight: 900;
+    letter-spacing: .2px;
+    margin: 0;
+  }
+  .hero-sub {
+    font-size: .9rem;
+    opacity: .85;
+    margin-top: 4px;
+  }
+  .tag {
+    display:inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.06);
+    font-size: .78rem;
+    margin-right: 6px;
+    margin-bottom: 6px;
+    white-space: nowrap;
+  }
+  .compare-grid {
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .compare-box {
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(0,0,0,0.18);
+    padding: 12px 12px 10px 12px;
+  }
+  .compare-h {
+    font-weight: 900;
+    margin: 0 0 6px 0;
+    letter-spacing: .2px;
+  }
+  .compare-row {
+    display:flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: .9rem;
+    margin: 2px 0;
+  }
+  .compare-k {opacity:.82;}
+  .compare-v {font-weight: 800;}
+  .hint {opacity:.72; font-size:.85rem; margin-top: 4px;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -338,6 +404,7 @@ mode = st.radio(
     "Choose what to render for the current slice",
     [
         "📦 Slice Summary (Any View)",
+        "🆚 Baseline Compare Dashboard",
         "🧾 Round Scorecard (by Round Link)",
         "🎯 Hole Scorecard (last 18 for a specific hole)",
         "👥 Player Comparison (same slice)",
@@ -685,6 +752,411 @@ def render_score_mix(b: pd.DataFrame, title="📊 Score Mix — Current Slice"):
         for _, row in df_cat.iterrows() if int(row.Count) > 0
     ) or "No category counts found in this slice."
     st.caption(cat_line)
+
+
+# =========================
+# Baseline Compare helpers
+# =========================
+def _apply_non_time_filters(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply the SAME non-time filters used for the slice, but WITHOUT any date/year/month constraints.
+    This makes 'June 2025 vs All of 2025' work correctly: slice picks June; baseline picks year.
+    """
+    out = frame.copy()
+
+    # Trip
+    if sel_trips:
+        out = out[out[GOLF_TRIP_COL].isin(sel_trips)]
+
+    # Players (match the slice's selected players, if any)
+    if sel_players:
+        out = out[out["Player Name"].isin(sel_players)]
+
+    # Courses
+    if sel_courses:
+        out = out[out["Course Name"].isin(sel_courses)]
+
+    # Par
+    if sel_pars:
+        out = out[out["Par"].isin(sel_pars)]
+
+    # Club / holes
+    if sel_clubs:
+        out = out[out[CLUB_COL].isin(sel_clubs)]
+    if sel_holes:
+        out = out[out["Hole"].isin(sel_holes)]
+
+    # Fairway (P4/P5 only)
+    if sel_fw != "All":
+        p45_mask = out["Par"].isin([4, 5])
+        if sel_fw == "Yes":
+            out = out[~p45_mask | (out["Fairway"] == 1)]
+        else:
+            out = out[~p45_mask | (out["Fairway"] == 0)]
+
+    # GIR / Approach GIR
+    if sel_gir != "All":
+        out = out[out["GIR"] == sel_gir]
+    if sel_appr_gir != "All":
+        out = out[out["Approach GIR"] == sel_appr_gir]
+
+    # Yardage range (only apply when yard col exists)
+    yard_n = _num(out.get(YARD_COL), default=pd.NA)
+    out = out[(yard_n.isna()) | ((yard_n >= y_low) & (yard_n <= y_high))].copy()
+
+    return out
+
+
+def _baseline_controls(df_all: pd.DataFrame, key_prefix: str = "base") -> pd.DataFrame:
+    """
+    Returns a baseline frame based on user selection.
+    Baseline is independent of the current slice, but can optionally inherit the *non-time* filters.
+    """
+    st.markdown("<div class='dash-card'>"
+                "<div class='dash-title'>🆚 Baseline Settings</div>"
+                "<div class='dash-sub muted'>Pick what the slice should be compared against.</div>",
+                unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([1.4, 1.2, 1.4])
+    with c1:
+        baseline_type = st.selectbox(
+            "Baseline Type",
+            ["All Time", "All of Year(s)", "Specific Months (Year + Month)", "Custom Date Range"],
+            key=f"{key_prefix}_type",
+        )
+    with c2:
+        inherit_filters = st.toggle(
+            "Inherit non-time filters",
+            value=True,
+            help="If ON: baseline keeps Course/Par/Club/Hole/FW/GIR/etc filters, but uses its own time window.",
+            key=f"{key_prefix}_inherit",
+        )
+    with c3:
+        min_holes_base = st.number_input(
+            "Min holes (baseline)",
+            min_value=0,
+            value=0,
+            step=9,
+            help="Optional: require at least this many holes in the baseline.",
+            key=f"{key_prefix}_minholes",
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Start from full data, then (optionally) inherit NON-time filters from the current slice.
+    base_src = _apply_non_time_filters(df_all) if inherit_filters else df_all.copy()
+
+    # Apply baseline time logic
+    if baseline_type == "All Time":
+        baseline_df = base_src
+
+    elif baseline_type == "All of Year(s)":
+        all_years = sorted([int(x) for x in df_all["Year"].dropna().unique().tolist()], reverse=True)
+        yrs = st.multiselect("Select baseline year(s)", all_years, default=sel_years if sel_years else [], key=f"{key_prefix}_yrs")
+        if yrs:
+            baseline_df = base_src[base_src["Year"].isin([int(x) for x in yrs])].copy()
+        else:
+            baseline_df = base_src.copy()
+
+    elif baseline_type == "Specific Months (Year + Month)":
+        all_years = sorted([int(x) for x in df_all["Year"].dropna().unique().tolist()], reverse=True)
+        yrs = st.multiselect("Year(s)", all_years, default=sel_years if sel_years else [], key=f"{key_prefix}_m_yrs")
+        mos = st.multiselect("Month(s)", months, default=[], key=f"{key_prefix}_m_mos")
+        baseline_df = base_src.copy()
+        if yrs:
+            baseline_df = baseline_df[baseline_df["Year"].isin([int(x) for x in yrs])].copy()
+        if mos:
+            baseline_df = baseline_df[baseline_df["Month"].isin(mos)].copy()
+
+    else:  # Custom Date Range
+        min_dt = df_all["Date Played"].min()
+        max_dt = df_all["Date Played"].max()
+        min_d = min_dt.date() if pd.notna(min_dt) else datetime.date.today()
+        max_d = max_dt.date() if pd.notna(max_dt) else datetime.date.today()
+
+        d1, d2 = st.columns(2)
+        with d1:
+            b_start = st.date_input("Baseline start", value=min_d, min_value=min_d, max_value=max_d, key=f"{key_prefix}_start")
+        with d2:
+            b_end = st.date_input("Baseline end", value=max_d, min_value=min_d, max_value=max_d, key=f"{key_prefix}_end")
+
+        if b_start > b_end:
+            b_start, b_end = b_end, b_start
+
+        baseline_df = base_src[
+            (base_src["Date Played"] >= pd.to_datetime(b_start)) &
+            (base_src["Date Played"] <= pd.to_datetime(b_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        ].copy()
+
+    if min_holes_base and min_holes_base > 0 and not baseline_df.empty:
+        if int(baseline_df.shape[0]) < int(min_holes_base):
+            st.warning(f"Baseline only has {baseline_df.shape[0]:,} holes (below Min holes). Deltas may be noisy.")
+        # We don't drop rows; we just warn.
+
+    return baseline_df
+
+
+def _delta_with_base(curr, base, invert=False, pct_points=False, fmt_curr=None, fmt_base=None):
+    """
+    Returns a delta string that ALSO shows the baseline value.
+    Examples:
+      - "base 38.0% • ▲ +4.1 pts"
+      - "base 31.2 • ▼ -1.4 (↓ better)"
+    """
+    if curr is None or base is None or pd.isna(curr) or pd.isna(base):
+        return "—"
+    try:
+        curr_f = float(curr)
+        base_f = float(base)
+    except Exception:
+        return "—"
+
+    d = curr_f - base_f
+    arrow = "▲" if d > 0 else ("▼" if d < 0 else "→")
+
+    # Format baseline
+    if fmt_base:
+        try:
+            base_txt = fmt_base.format(base_f)
+        except Exception:
+            base_txt = str(base)
+    else:
+        base_txt = f"{base_f:.1f}%" if pct_points else f"{base_f:.2f}"
+
+    # Format delta
+    if pct_points:
+        d_txt = f"{arrow} {d:+.1f} pts"
+    else:
+        d_txt = f"{arrow} {d:+.2f}"
+
+    if invert:
+        d_txt = d_txt + " (↓ better)"
+
+    return f"base {base_txt} • {d_txt}"
+
+def _fmt_val(v, kind="num"):
+    if v is None or pd.isna(v):
+        return "—"
+    try:
+        f = float(v)
+    except Exception:
+        return str(v)
+    if kind == "pct":
+        return f"{f:.1f}%"
+    if kind == "int":
+        return f"{int(round(f)):,}"
+    if kind == "to_par":
+        return _fmt_to_par(f)
+    return f"{f:.2f}"
+
+def _compare_df(curr: dict, base: dict) -> pd.DataFrame:
+    """
+    Friendly compare table: Metric | Slice | Baseline | Δ
+    For percentages, Δ is in percentage points.
+    """
+    def row(metric, slice_v, base_v, kind="num", invert=False, delta_kind=None):
+        if delta_kind is None:
+            delta_kind = kind
+        # compute delta numeric
+        d = None
+        try:
+            if slice_v is not None and base_v is not None and (not pd.isna(slice_v)) and (not pd.isna(base_v)):
+                d = float(slice_v) - float(base_v)
+        except Exception:
+            d = None
+
+        # format delta
+        if d is None:
+            d_txt = "—"
+        else:
+            arrow = "▲" if d > 0 else ("▼" if d < 0 else "→")
+            if delta_kind == "pct":
+                d_txt = f"{arrow} {d:+.1f} pts"
+            elif delta_kind == "int":
+                d_txt = f"{arrow} {d:+.0f}"
+            else:
+                d_txt = f"{arrow} {d:+.2f}"
+            if invert:
+                d_txt += " (↓ better)"
+
+        return {
+            "Metric": metric,
+            "Slice": _fmt_val(slice_v, kind),
+            "Baseline": _fmt_val(base_v, kind),
+            "Δ": d_txt,
+        }
+
+    rows = []
+
+    # Headliners
+    rows += [
+        row("Holes", curr["holes_played"], base["holes_played"], kind="int", delta_kind="int"),
+        row("To Par", curr["to_par"], base["to_par"], kind="to_par", invert=True),
+        row("Avg / 72", curr.get("par72_score"), base.get("par72_score"), kind="num", invert=True),
+        row("Putts / 18", curr["putts_per_18"], base["putts_per_18"], kind="num", invert=True),
+        row("GIR%", curr["gir_pct"], base["gir_pct"], kind="pct", delta_kind="pct"),
+        row("FW% (P4/P5)", curr["fw_pct"], base["fw_pct"], kind="pct", delta_kind="pct"),
+        row("Scr%", curr["scr_pct"], base["scr_pct"], kind="pct", delta_kind="pct"),
+        row("U&D%", curr["ud_pct"], base["ud_pct"], kind="pct", delta_kind="pct"),
+        row("1P%", curr["one_putt_pct"], base["one_putt_pct"], kind="pct", delta_kind="pct"),
+        row("3+P%", curr["three_plus_putt_pct"], base["three_plus_putt_pct"], kind="pct", invert=True, delta_kind="pct"),
+        row("3P Bogey%", curr["three_putt_bogey_pct"], base["three_putt_bogey_pct"], kind="pct", invert=True, delta_kind="pct"),
+        row("Lost Balls", curr["lb_total"], base["lb_total"], kind="int", invert=True, delta_kind="int"),
+        row("Pro Pars+", curr["pro_pars_plus"], base["pro_pars_plus"], kind="int", delta_kind="int"),
+        row("Arnies", curr["arnies"], base["arnies"], kind="int", delta_kind="int"),
+        row("Seves", curr["seves"], base["seves"], kind="int", delta_kind="int"),
+        row("Hole Outs", curr["hole_outs"], base["hole_outs"], kind="int", delta_kind="int"),
+    ]
+
+    # Par splits
+    rows += [
+        row("Avg P3", curr["avg_p3"], base["avg_p3"], kind="num", invert=True),
+        row("Avg P4", curr["avg_p4"], base["avg_p4"], kind="num", invert=True),
+        row("Avg P5", curr["avg_p5"], base["avg_p5"], kind="num", invert=True),
+        row("GIR P3%", curr["gir3"][2], base["gir3"][2], kind="pct", delta_kind="pct"),
+        row("GIR P4%", curr["gir4"][2], base["gir4"][2], kind="pct", delta_kind="pct"),
+        row("GIR P5%", curr["gir5"][2], base["gir5"][2], kind="pct", delta_kind="pct"),
+        row("FW P4%", curr["fw4"][2], base["fw4"][2], kind="pct", delta_kind="pct"),
+        row("FW P5%", curr["fw5"][2], base["fw5"][2], kind="pct", delta_kind="pct"),
+        row("GIR|FW% P4", curr["fw_gir4"][2], base["fw_gir4"][2], kind="pct", delta_kind="pct"),
+        row("GIR|FW% P5", curr["fw_gir5"][2], base["fw_gir5"][2], kind="pct", delta_kind="pct"),
+    ]
+
+    return pd.DataFrame(rows)
+
+def _style_compare_table(t: pd.DataFrame):
+    if t is None or t.empty:
+        return t
+    def shade_delta(val):
+        s = str(val)
+        if "—" in s:
+            return ""
+        # light green for ▲ on higher-better metrics, but we can't infer here reliably.
+        # We'll just give direction-based subtle shading.
+        if s.startswith("▲"):
+            return "background-color: rgba(0, 200, 0, 0.14); font-weight:800;"
+        if s.startswith("▼"):
+            return "background-color: rgba(255, 80, 80, 0.14); font-weight:800;"
+        return "opacity: .85;"
+    return t.style.applymap(shade_delta, subset=["Δ"])
+
+
+def render_baseline_compare_dashboard(curr_df: pd.DataFrame, baseline_df: pd.DataFrame, title: str):
+    st.markdown("<div class='dash-wrap'></div>", unsafe_allow_html=True)
+    st.subheader(title)
+
+    # Summaries
+    curr = build_summary(curr_df)
+    base = build_summary(baseline_df) if (baseline_df is not None and not baseline_df.empty) else None
+
+    # Friendly labels
+    slice_label = f"{_fmt_date(curr_df['Date Played'].min())} → {_fmt_date(curr_df['Date Played'].max())}"
+    base_label = "—"
+    if baseline_df is not None and not baseline_df.empty:
+        base_label = f"{_fmt_date(baseline_df['Date Played'].min())} → {_fmt_date(baseline_df['Date Played'].max())}"
+
+    # Hero (clean summary)
+    tags = []
+    tags.append(f"📌 Slice: {curr['holes_played']:,} holes")
+    if baseline_df is not None and not baseline_df.empty:
+        tags.append(f"🧱 Baseline: {baseline_df.shape[0]:,} holes")
+    tags.append(f"📅 Slice dates: {slice_label}")
+    if baseline_df is not None and not baseline_df.empty:
+        tags.append(f"📅 Baseline dates: {base_label}")
+
+    st.markdown(
+        "<div class='hero'>"
+        "  <div class='hero-top'>"
+        "    <div>"
+        "      <div class='hero-title'>🆚 Slice vs Baseline</div>"
+        "      <div class='hero-sub'>Deltas are <b>Slice − Baseline</b>. Use the Baseline Settings above to control what you’re comparing against.</div>"
+        "    </div>"
+        "  </div>"
+        + "".join([f"<span class='tag'>{t}</span>" for t in tags]) +
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if base is None:
+        st.warning("Baseline is empty with current settings.")
+        return
+
+
+    # Quick totals (Slice vs Baseline)
+    st.markdown("<div class='compare-grid'>"
+                "<div class='compare-box'>"
+                "<div class='compare-h'>📌 Slice Totals</div>"
+                f"<div class='compare-row'><div class='compare-k'>Holes</div><div class='compare-v'>{curr['holes_played']:,}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>To Par</div><div class='compare-v'>{_fmt_to_par(curr['to_par'])}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{'—' if curr.get('par72_score') is None else f'{curr['par72_score']:.1f}'}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Putts / 18</div><div class='compare-v'>{curr['putts_per_18']:.1f}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>GIR%</div><div class='compare-v'>{curr['gir_pct']:.1f}% {_emoji(curr['gir_pct'])}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>FW% (P4/P5)</div><div class='compare-v'>{curr['fw_pct']:.1f}% {_emoji(curr['fw_pct'])}</div></div>"
+                "</div>"
+                "<div class='compare-box'>"
+                "<div class='compare-h'>🧱 Baseline Totals</div>"
+                f"<div class='compare-row'><div class='compare-k'>Holes</div><div class='compare-v'>{base['holes_played']:,}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>To Par</div><div class='compare-v'>{_fmt_to_par(base['to_par'])}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{'—' if base.get('par72_score') is None else f'{base['par72_score']:.1f}'}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Putts / 18</div><div class='compare-v'>{base['putts_per_18']:.1f}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>GIR%</div><div class='compare-v'>{base['gir_pct']:.1f}% {_emoji(base['gir_pct'])}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>FW% (P4/P5)</div><div class='compare-v'>{base['fw_pct']:.1f}% {_emoji(base['fw_pct'])}</div></div>"
+                "</div>"
+                "</div>", unsafe_allow_html=True)
+
+    # ===== Key cards (match dashboard feel) =====
+    st.markdown("<div class='section-h'>📊 Compare Table</div>", unsafe_allow_html=True)
+    comp = _compare_df(curr, base)
+    # Make it easier to scan: show most important rows first
+    top_metrics = [
+        "Holes","To Par","Avg / 72","Putts / 18","GIR%","FW% (P4/P5)","Scr%","U&D%","1P%","3+P%","3P Bogey%","Lost Balls"
+    ]
+    comp["Order"] = comp["Metric"].apply(lambda x: top_metrics.index(x) if x in top_metrics else 999)
+    comp = comp.sort_values(["Order","Metric"]).drop(columns=["Order"]).reset_index(drop=True)
+
+    st.dataframe(_style_compare_table(comp), use_container_width=True, hide_index=True)
+    st.caption("Tip: Δ is Slice − Baseline (percentages shown in points).")
+
+
+    st.markdown("<div class='section-h'>🎯 Ball Striking</div>", unsafe_allow_html=True)
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("GIR", _cnt_pair(curr["gir_made"], curr["gir_att"]), _delta_with_base(curr["gir_pct"], base["gir_pct"], pct_points=True))
+    b2.metric("FW (P4/P5)", _cnt_pair(curr["fw_made"], curr["fw_att"]), _delta_with_base(curr["fw_pct"], base["fw_pct"], pct_points=True))
+    b3.metric("GIR|FW", _cnt_pair(curr["fw_gir_made"], curr["fw_gir_att"]), _delta_with_base(curr["fw_gir_pct"], base["fw_gir_pct"], pct_points=True))
+    b4.metric("GIR|FW% (P4/P5)", f"{curr['fw_gir_pct']:.1f}% {_emoji(curr['fw_gir_pct'])}", _delta_with_base(curr["fw_gir_pct"], base["fw_gir_pct"], pct_points=True))
+
+    st.markdown("<div class='section-h'>🩹 Short Game</div>", unsafe_allow_html=True)
+    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    s1.metric("U&D%", f"{curr['ud_pct']:.1f}%", _delta_with_base(curr["ud_pct"], base["ud_pct"], pct_points=True))
+    s2.metric("1P%", f"{curr['one_putt_pct']:.1f}%", _delta_with_base(curr["one_putt_pct"], base["one_putt_pct"], pct_points=True))
+    s3.metric("3+P%", f"{curr['three_plus_putt_pct']:.1f}%", _delta_with_base(curr["three_plus_putt_pct"], base["three_plus_putt_pct"], invert=True, pct_points=True))
+    s4.metric("3P Bogey%", f"{curr['three_putt_bogey_pct']:.1f}%", _delta_with_base(curr["three_putt_bogey_pct"], base["three_putt_bogey_pct"], invert=True, pct_points=True))
+    s5.metric("Lost Balls", f"{curr['lb_total']:,}", _delta_with_base(curr["lb_total"], base["lb_total"], invert=True))
+    s6.metric("Pro Pars+", f"{curr['pro_pars_plus']:,}", _delta_with_base(curr["pro_pars_plus"], base["pro_pars_plus"]))
+
+    st.markdown("<div class='section-h'>📈 Par Type Splits</div>", unsafe_allow_html=True)
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Avg P3", _fmt_avg(curr["avg_p3"]), _delta_with_base(curr["avg_p3"], base["avg_p3"], invert=True))
+    p2.metric("Avg P4", _fmt_avg(curr["avg_p4"]), _delta_with_base(curr["avg_p4"], base["avg_p4"], invert=True))
+    p3.metric("Avg P5", _fmt_avg(curr["avg_p5"]), _delta_with_base(curr["avg_p5"], base["avg_p5"], invert=True))
+
+    g1, g2, g3 = st.columns(3)
+    g1.metric("GIR P3%", f"{curr['gir3'][2]:.1f}% {_emoji(curr['gir3'][2])}", _delta_with_base(curr["gir3"][2], base["gir3"][2], pct_points=True))
+    g2.metric("GIR P4%", f"{curr['gir4'][2]:.1f}% {_emoji(curr['gir4'][2])}", _delta_with_base(curr["gir4"][2], base["gir4"][2], pct_points=True))
+    g3.metric("GIR P5%", f"{curr['gir5'][2]:.1f}% {_emoji(curr['gir5'][2])}", _delta_with_base(curr["gir5"][2], base["gir5"][2], pct_points=True))
+
+    f1, f2 = st.columns(2)
+    f1.metric("FW P4%", f"{curr['fw4'][2]:.1f}% {_emoji(curr['fw4'][2])}", _delta_with_base(curr["fw4"][2], base["fw4"][2], pct_points=True))
+    f2.metric("FW P5%", f"{curr['fw5'][2]:.1f}% {_emoji(curr['fw5'][2])}", _delta_with_base(curr["fw5"][2], base["fw5"][2], pct_points=True))
+
+    st.markdown("<div class='section-h'>✨ Specials</div>", unsafe_allow_html=True)
+    x1, x2, x3 = st.columns(3)
+    x1.metric("Arnies", f"{curr['arnies']:,}", _delta_with_base(curr["arnies"], base["arnies"]))
+    x2.metric("Seves", f"{curr['seves']:,}", _delta_with_base(curr["seves"], base["seves"]))
+    x3.metric("Hole Outs", f"{curr['hole_outs']:,}", _delta_with_base(curr["hole_outs"], base["hole_outs"]))
+
+    with st.expander("Show baseline + slice summaries (raw dicts)", expanded=False):
+        st.json({"slice": curr, "baseline": base})
+
 
 # =========================
 # Player Comparison table builder
@@ -1510,7 +1982,73 @@ def _render_scorecard_table(round_data: pd.DataFrame):
       .sc-score {{
         font-size:18px; font-weight:800; letter-spacing:.2px;
       }}
-    </style>
+    
+  .hero {
+    padding: 16px 16px 12px 16px;
+    border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+    box-shadow: 0 12px 28px rgba(0,0,0,.22);
+    margin-top: 10px;
+    margin-bottom: 10px;
+  }
+  .hero-top {
+    display:flex;
+    justify-content: space-between;
+    align-items:flex-end;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .hero-title {
+    font-size: 1.25rem;
+    font-weight: 900;
+    letter-spacing: .2px;
+    margin: 0;
+  }
+  .hero-sub {
+    font-size: .9rem;
+    opacity: .85;
+    margin-top: 4px;
+  }
+  .tag {
+    display:inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.06);
+    font-size: .78rem;
+    margin-right: 6px;
+    margin-bottom: 6px;
+    white-space: nowrap;
+  }
+  .compare-grid {
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .compare-box {
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(0,0,0,0.18);
+    padding: 12px 12px 10px 12px;
+  }
+  .compare-h {
+    font-weight: 900;
+    margin: 0 0 6px 0;
+    letter-spacing: .2px;
+  }
+  .compare-row {
+    display:flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: .9rem;
+    margin: 2px 0;
+  }
+  .compare-k {opacity:.82;}
+  .compare-v {font-weight: 800;}
+  .hint {opacity:.72; font-size:.85rem; margin-top: 4px;}
+</style>
 
     <div class="sc-wrap">
       <table class="sc-table">
@@ -1594,12 +2132,147 @@ def build_trip_digest(dfc: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # Render by mode
 # =========================
-if mode == "📦 Slice Summary (Any View)":
+if mode == "🆚 Baseline Compare Dashboard":
+    st.caption(f"Rows in slice: {slice_for_summary.shape[0]:,}")
+
+    # Baseline controls + baseline frame
+    baseline_df = _baseline_controls(df, key_prefix="baseline_dash")
+
+    # Render compare dashboard
+    render_baseline_compare_dashboard(
+        curr_df=slice_for_summary,
+        baseline_df=baseline_df,
+        title="🆚 Baseline Compare Dashboard — Full"
+    )
+
+elif mode == "📦 Slice Summary (Any View)":
     st.caption(f"Rows in slice: {slice_for_summary.shape[0]:,}")
 
     summary = build_summary(slice_for_summary)
     render_summary_cards(summary, title="📦 Current Slice — Summary")
     render_score_mix(slice_for_summary, title="📊 Score Mix — Current Slice (Counts + %)")
+
+    # =========================
+    # Baseline Comparison
+    # =========================
+    st.markdown("---")
+    st.subheader("📊 Baseline Comparison")
+
+    baseline_type = st.selectbox(
+        "Choose Baseline",
+        ["All Time", "Same Year(s) as Slice", "Custom Year(s)", "Custom Date Range"],
+        key="baseline_selector"
+    )
+
+    baseline_df = df.copy()
+
+    if baseline_type == "Same Year(s) as Slice" and sel_years:
+        baseline_df = baseline_df[baseline_df["Year"].isin([int(x) for x in sel_years])]
+
+    elif baseline_type == "Custom Year(s)":
+        all_years = sorted(df["Year"].dropna().unique())
+        custom_years = st.multiselect("Select Year(s)", all_years, key="baseline_years")
+        if custom_years:
+            baseline_df = baseline_df[baseline_df["Year"].isin(custom_years)]
+
+    elif baseline_type == "Custom Date Range":
+        b_start = st.date_input("Baseline Start Date", value=df["Date Played"].min(), key="baseline_start")
+        b_end = st.date_input("Baseline End Date", value=df["Date Played"].max(), key="baseline_end")
+        baseline_df = baseline_df[
+            (baseline_df["Date Played"] >= pd.to_datetime(b_start)) &
+            (baseline_df["Date Played"] <= pd.to_datetime(b_end))
+        ]
+
+    baseline_summary = build_summary(baseline_df)
+
+    def _delta(a, b, invert=False):
+        if b == 0:
+            return "—"
+        d = a - b
+        arrow = "▲" if d > 0 else ("▼" if d < 0 else "→")
+        if invert:
+            arrow = "▲" if d < 0 else ("▼" if d > 0 else "→")
+        return f"{arrow} {d:.2f}"
+
+    st.markdown("#### Key Metric Comparison")
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("To Par",
+              _fmt_to_par(summary["to_par"]),
+              _delta(summary["to_par"], baseline_summary["to_par"], invert=True))
+
+    c2.metric("GIR %",
+              _fmt_pct1(summary["gir_pct"]),
+              _delta(summary["gir_pct"], baseline_summary["gir_pct"]))
+
+    c3.metric("FW %",
+              _fmt_pct1(summary["fw_pct"]),
+              _delta(summary["fw_pct"], baseline_summary["fw_pct"]))
+
+    c4.metric("Putts / 18",
+              _fmt_avg(summary["putts_per_18"]),
+              _delta(summary["putts_per_18"], baseline_summary["putts_per_18"], invert=True))
+
+    # =========================
+    # Baseline Comparison
+    # =========================
+    st.markdown("---")
+    st.subheader("📊 Baseline Comparison")
+
+    baseline_type = st.selectbox(
+        "Choose Baseline",
+        ["All Time", "Same Year(s) as Slice", "Custom Year(s)", "Custom Date Range"]
+    )
+
+    baseline_df = df.copy()
+
+    if baseline_type == "Same Year(s) as Slice" and sel_years:
+        baseline_df = baseline_df[baseline_df["Year"].isin([int(x) for x in sel_years])]
+
+    elif baseline_type == "Custom Year(s)":
+        all_years = sorted(df["Year"].dropna().unique())
+        custom_years = st.multiselect("Select Year(s)", all_years)
+        if custom_years:
+            baseline_df = baseline_df[baseline_df["Year"].isin(custom_years)]
+
+    elif baseline_type == "Custom Date Range":
+        b_start = st.date_input("Baseline Start Date", value=df["Date Played"].min())
+        b_end = st.date_input("Baseline End Date", value=df["Date Played"].max())
+        baseline_df = baseline_df[
+            (baseline_df["Date Played"] >= pd.to_datetime(b_start)) &
+            (baseline_df["Date Played"] <= pd.to_datetime(b_end))
+        ]
+
+    baseline_summary = build_summary(baseline_df)
+
+    def _delta(a, b, invert=False):
+        if b == 0:
+            return "—"
+        d = a - b
+        arrow = "▲" if d > 0 else ("▼" if d < 0 else "→")
+        if invert:
+            arrow = "▲" if d < 0 else ("▼" if d > 0 else "→")
+        return f"{arrow} {d:.2f}"
+
+    st.markdown("#### Key Metric Comparison")
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("To Par",
+              _fmt_to_par(summary["to_par"]),
+              _delta(summary["to_par"], baseline_summary["to_par"], invert=True))
+
+    c2.metric("GIR %",
+              _fmt_pct1(summary["gir_pct"]),
+              _delta(summary["gir_pct"], baseline_summary["gir_pct"]))
+
+    c3.metric("FW %",
+              _fmt_pct1(summary["fw_pct"]),
+              _delta(summary["fw_pct"], baseline_summary["fw_pct"]))
+
+    c4.metric("Putts / 18",
+              _fmt_avg(summary["putts_per_18"]),
+              _delta(summary["putts_per_18"], baseline_summary["putts_per_18"], invert=True))
+
 
     with st.expander("Show slice rows (preview)", expanded=False):
         show_cols = [c for c in [
