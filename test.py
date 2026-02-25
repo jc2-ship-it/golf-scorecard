@@ -20,6 +20,24 @@ import streamlit as st
 import datetime
 import altair as alt
 
+# ---------------------------
+# Shared numeric helpers (used by putting + approach)
+# ---------------------------
+def _n(series, default=0):
+    return pd.to_numeric(series, errors="coerce").fillna(default)
+
+def _as_int(series, default=0):
+    return _n(series, default=default).astype(int)
+
+def _pct(numer, denom):
+    return (numer / denom * 100.0) if denom else 0.0
+
+def _pct_str(x):
+    try:
+        return f"{float(x):.1f}%"
+    except:
+        return "—"
+
 # =========================
 # Config
 # =========================
@@ -31,6 +49,8 @@ PROX_COL = "Proximity to Hole - How far is your First Putt (FT)"
 YARD_COL = "Approach Shot Distance (how far you had to the hole)"
 CLUB_COL = "Approach Shot Club Used"
 FEET_MADE_COL = "Feet of Putt Made (How far was the putt you made)"
+
+SCORE_COL = "Hole Score"
 GOLF_TRIP_COL = "Golf Trip"
 
 NEEDED_COLS = [
@@ -89,73 +109,7 @@ st.markdown(
     letter-spacing: .2px;
   }
   .muted {opacity: .82;}
-
-  .hero {
-    padding: 16px 16px 12px 16px;
-    border-radius: 16px;
-    border: 1px solid rgba(255,255,255,0.10);
-    background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-    box-shadow: 0 12px 28px rgba(0,0,0,.22);
-    margin-top: 10px;
-    margin-bottom: 10px;
-  }
-  .hero-top {
-    display:flex;
-    justify-content: space-between;
-    align-items:flex-end;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-  .hero-title {
-    font-size: 1.25rem;
-    font-weight: 900;
-    letter-spacing: .2px;
-    margin: 0;
-  }
-  .hero-sub {
-    font-size: .9rem;
-    opacity: .85;
-    margin-top: 4px;
-  }
-  .tag {
-    display:inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.16);
-    background: rgba(255,255,255,0.06);
-    font-size: .78rem;
-    margin-right: 6px;
-    margin-bottom: 6px;
-    white-space: nowrap;
-  }
-  .compare-grid {
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 8px;
-  }
-  .compare-box {
-    border-radius: 14px;
-    border: 1px solid rgba(255,255,255,0.10);
-    background: rgba(0,0,0,0.18);
-    padding: 12px 12px 10px 12px;
-  }
-  .compare-h {
-    font-weight: 900;
-    margin: 0 0 6px 0;
-    letter-spacing: .2px;
-  }
-  .compare-row {
-    display:flex;
-    justify-content: space-between;
-    gap: 10px;
-    font-size: .9rem;
-    margin: 2px 0;
-  }
-  .compare-k {opacity:.82;}
-  .compare-v {font-weight: 800;}
-  .hint {opacity:.72; font-size:.85rem; margin-top: 4px;}
-</style>
+    </style>
 """,
     unsafe_allow_html=True,
 )
@@ -410,7 +364,8 @@ mode = st.radio(
         "👥 Player Comparison (same slice)",
         "🏆 Leaderboard Dashboard (multi-stat)",
         "📊 Visual Dashboard (charts-only)",
-        "📈 Approach Analytics (Distance + Club + Heatmap)"
+        "📈 Approach Analytics (Distance + Club + Heatmap)",
+        "⛳ Putting Proximity (Validation)"
     ],
     horizontal=True
 )
@@ -1081,13 +1036,29 @@ def render_baseline_compare_dashboard(curr_df: pd.DataFrame, baseline_df: pd.Dat
         return
 
 
+    # Quick totals    # Overlay another player (same slice filters)
+    with st.expander("🧑‍🤝‍🧑 Overlay another player (same slice filters)", expanded=False):
+        overlay_player = st.selectbox("Overlay Player", options=["— None —"] + players, index=0, key="baseline_dash_overlay_player")
+        if overlay_player and overlay_player != "— None —":
+            o_df = base_f[base_f["Player Name"] == overlay_player].copy()
+            if o_df.empty:
+                st.info("No rows for that player in the current slice filters.")
+            else:
+                oth = build_summary(o_df)
+                comp_o = _compare_df(curr, oth)
+                st.dataframe(_style_compare_table(comp_o), use_container_width=True, hide_index=True)
+                st.caption("Overlay compares the current slice vs the selected player (same filters).")
+
+
     # Quick totals (Slice vs Baseline)
+    avg72_curr_txt = "—" if curr.get("par72_score") is None else f"{curr['par72_score']:.1f}"
+    avg72_base_txt = "—" if base.get("par72_score") is None else f"{base['par72_score']:.1f}"
     st.markdown("<div class='compare-grid'>"
                 "<div class='compare-box'>"
                 "<div class='compare-h'>📌 Slice Totals</div>"
                 f"<div class='compare-row'><div class='compare-k'>Holes</div><div class='compare-v'>{curr['holes_played']:,}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>To Par</div><div class='compare-v'>{_fmt_to_par(curr['to_par'])}</div></div>"
-                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{'—' if curr.get('par72_score') is None else f'{curr['par72_score']:.1f}'}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{avg72_curr_txt}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>Putts / 18</div><div class='compare-v'>{curr['putts_per_18']:.1f}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>GIR%</div><div class='compare-v'>{curr['gir_pct']:.1f}% {_emoji(curr['gir_pct'])}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>FW% (P4/P5)</div><div class='compare-v'>{curr['fw_pct']:.1f}% {_emoji(curr['fw_pct'])}</div></div>"
@@ -1096,7 +1067,7 @@ def render_baseline_compare_dashboard(curr_df: pd.DataFrame, baseline_df: pd.Dat
                 "<div class='compare-h'>🧱 Baseline Totals</div>"
                 f"<div class='compare-row'><div class='compare-k'>Holes</div><div class='compare-v'>{base['holes_played']:,}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>To Par</div><div class='compare-v'>{_fmt_to_par(base['to_par'])}</div></div>"
-                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{'—' if base.get('par72_score') is None else f'{base['par72_score']:.1f}'}</div></div>"
+                f"<div class='compare-row'><div class='compare-k'>Avg / 72</div><div class='compare-v'>{avg72_base_txt}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>Putts / 18</div><div class='compare-v'>{base['putts_per_18']:.1f}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>GIR%</div><div class='compare-v'>{base['gir_pct']:.1f}% {_emoji(base['gir_pct'])}</div></div>"
                 f"<div class='compare-row'><div class='compare-k'>FW% (P4/P5)</div><div class='compare-v'>{base['fw_pct']:.1f}% {_emoji(base['fw_pct'])}</div></div>"
@@ -1671,9 +1642,15 @@ def build_gir_by_distance(frame: pd.DataFrame, min_attempts: int = 1) -> pd.Data
 
     g = b.groupby("Dist Bucket", as_index=False).agg(
         Attempts=("Dist Bucket", "size"),
-        GIR_Made=("GIR", lambda s: int((s == "Yes").sum()))
+        GIR_Made=("GIR", lambda s: int((s == "Yes").sum())),
+        Score_Total=("Hole Score", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
+        Par_Total=("Par", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
     )
     g["GIR%"] = g.apply(lambda r: _pct(r["GIR_Made"], r["Attempts"]), axis=1)
+    # Scoring context (relative to Par)
+    g["ToPar_Total"] = g["Score_Total"] - g["Par_Total"]
+    g["ToPar/Hole"] = g.apply(lambda r: (r["ToPar_Total"] / r["Attempts"]) if r["Attempts"] else 0.0, axis=1)
+    g["Avg Score"] = g.apply(lambda r: (r["Score_Total"] / r["Attempts"]) if r["Attempts"] else 0.0, axis=1)
     g["Qty"] = g["GIR_Made"].astype(int).astype(str) + "/" + g["Attempts"].astype(int).astype(str)
     g["Label"] = g["Qty"] + " • " + g["GIR%"].round(1).astype(str) + "%"
     g["Mid"] = g["Dist Bucket"].astype(str).apply(_bucket_mid)
@@ -1701,9 +1678,15 @@ def build_gir_by_club(frame: pd.DataFrame, min_attempts: int = 1) -> pd.DataFram
 
     g = b.groupby("Club", as_index=False).agg(
         Attempts=("Club", "size"),
-        GIR_Made=("GIR", lambda s: int((s == "Yes").sum()))
+        GIR_Made=("GIR", lambda s: int((s == "Yes").sum())),
+        Score_Total=("Hole Score", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
+        Par_Total=("Par", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
     )
     g["GIR%"] = g.apply(lambda r: _pct(r["GIR_Made"], r["Attempts"]), axis=1)
+    # Scoring context (relative to Par)
+    g["ToPar_Total"] = g["Score_Total"] - g["Par_Total"]
+    g["ToPar/Hole"] = g.apply(lambda r: (r["ToPar_Total"] / r["Attempts"]) if r["Attempts"] else 0.0, axis=1)
+    g["Avg Score"] = g.apply(lambda r: (r["Score_Total"] / r["Attempts"]) if r["Attempts"] else 0.0, axis=1)
     g["Qty"] = g["GIR_Made"].astype(int).astype(str) + "/" + g["Attempts"].astype(int).astype(str)
     g["Label"] = g["Qty"] + " • " + g["GIR%"].round(1).astype(str) + "%"
 
@@ -1736,9 +1719,14 @@ def build_gir_heatmap_distance_x_club(frame: pd.DataFrame, min_cell_attempts: in
 
     g = b.groupby(["Dist Bucket", "Club"], as_index=False).agg(
         Attempts=("GIR", "size"),
-        GIR_Made=("GIR", lambda s: int((s == "Yes").sum()))
+        GIR_Made=("GIR", lambda s: int((s == "Yes").sum())),
+        Score_Total=("Hole Score", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
+        Par_Total=("Par", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
     )
     g["GIR%"] = g.apply(lambda r: _pct(r["GIR_Made"], r["Attempts"]), axis=1)
+    # Scoring context (relative to Par)
+    g["ToPar_Total"] = g["Score_Total"] - g["Par_Total"]
+    g["ToPar/Hole"] = g.apply(lambda r: (r["ToPar_Total"] / r["Attempts"]) if r["Attempts"] else 0.0, axis=1)
     g["Qty"] = g["GIR_Made"].astype(int).astype(str) + "/" + g["Attempts"].astype(int).astype(str)
 
     if min_cell_attempts and min_cell_attempts > 1:
@@ -1756,6 +1744,8 @@ def _line_chart_distance_gir(g: pd.DataFrame):
 
     bucket_order = [x[0] for x in _distance_buckets_standard()]
 
+    has_group = "Group" in g.columns
+
     base = alt.Chart(g).encode(
         x=alt.X("Dist Bucket:N", sort=bucket_order, title="Approach Distance Bucket"),
         y=alt.Y("GIR%:Q", title="GIR %"),
@@ -1764,17 +1754,56 @@ def _line_chart_distance_gir(g: pd.DataFrame):
             alt.Tooltip("Qty:N", title="Qty"),
             alt.Tooltip("GIR%:Q", title="GIR%", format=".1f"),
             alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
-        ],
+        ] + ([alt.Tooltip("Group:N", title="Group")] if has_group else []),
     )
 
-    line = base.mark_line(point=True)
-    text = base.mark_text(dy=-10).encode(text=alt.Text("Label:N"))
+    if has_group:
+        line = base.mark_line(point=True).encode(color=alt.Color("Group:N", title=None))
+        st.altair_chart(line.properties(height=260), use_container_width=True)
+    else:
+        line = base.mark_line(point=True)
+        text = base.mark_text(dy=-10).encode(text=alt.Text("Label:N"))
+        st.altair_chart((line + text).properties(height=260), use_container_width=True)
 
-    st.altair_chart((line + text).properties(height=260), use_container_width=True)
 
 def _bar_chart_club_gir(g: pd.DataFrame, top_n: int = 18):
     if g.empty:
         st.caption("No club data for GIR.")
+        return
+
+    has_group = "Group" in g.columns
+
+    if has_group:
+        # Keep top clubs by primary group (or overall if not present)
+        gg = g.copy()
+        # Choose an ordering based on total attempts
+        club_order = (
+            gg.groupby("Club")["Attempts"].sum()
+            .sort_values(ascending=False)
+            .head(top_n)
+            .index.tolist()
+        )
+        gg = gg[gg["Club"].isin(club_order)].copy()
+
+        ch = (
+            alt.Chart(gg)
+            .mark_bar()
+            .encode(
+                y=alt.Y("Club:N", sort=club_order, title=None),
+                x=alt.X("GIR%:Q", title="GIR %"),
+                color=alt.Color("Group:N", title=None),
+                xOffset=alt.XOffset("Group:N"),
+                tooltip=[
+                    alt.Tooltip("Group:N", title="Group"),
+                    alt.Tooltip("Club:N", title="Club"),
+                    alt.Tooltip("Qty:N", title="Qty"),
+                    alt.Tooltip("GIR%:Q", format=".1f", title="GIR%"),
+                    alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
+                ],
+            )
+            .properties(height=min(520, 26 * len(club_order) + 60))
+        )
+        st.altair_chart(ch, use_container_width=True)
         return
 
     gg = g.head(top_n).copy()
@@ -1805,6 +1834,7 @@ def _bar_chart_club_gir(g: pd.DataFrame, top_n: int = 18):
     )
 
     st.altair_chart(ch + text, use_container_width=True)
+
 
 def _heatmap_distance_x_club(g: pd.DataFrame):
     if g.empty:
@@ -1838,6 +1868,11 @@ def _heatmap_distance_x_club(g: pd.DataFrame):
     st.altair_chart(ch, use_container_width=True)
 
 def build_approach_reference_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Small grounding table for the Approach Analytics tab.
+
+    We intentionally show GIR as Qty (made/att) so 'Attempts' is redundant.
+    Replace it with Score to Par (avg per hole) to make performance impact obvious.
+    """
     if frame.empty:
         return pd.DataFrame()
 
@@ -1847,7 +1882,19 @@ def build_approach_reference_table(frame: pd.DataFrame) -> pd.DataFrame:
         att = int(block.shape[0])
         made = int((block["GIR"] == "Yes").sum()) if att else 0
         pct = _pct(made, att)
-        return {"Split": label, "GIR": _cnt_pair(made, att), "GIR%": pct, "Attempts": att}
+
+        # Avg score relative to par (per hole). Negative is better.
+        score = pd.to_numeric(block.get("Hole Score"), errors="coerce")
+        par = pd.to_numeric(block.get("Par"), errors="coerce")
+        rel = (score - par)
+        rel_avg = float(rel.mean()) if att and rel.notna().any() else pd.NA
+
+        return {
+            "Split": label,
+            "GIR": _cnt_pair(made, att),
+            "GIR%": pct,
+            "Score to Par": rel_avg,
+        }
 
     rows = []
     rows.append(_row("Overall", b))
@@ -1871,6 +1918,13 @@ def _style_pct_table(df_: pd.DataFrame, pct_cols=("GIR%",)):
     for c in pct_cols:
         if c in df_.columns:
             fmt[c] = "{:.1f}%"
+    # Score context formatting
+    if "ToPar/Hole" in df_.columns:
+        fmt["ToPar/Hole"] = "{:+.2f}"
+    if "ToPar_Total" in df_.columns:
+        fmt["ToPar_Total"] = "{:+.0f}"
+    if "Avg Score" in df_.columns:
+        fmt["Avg Score"] = "{:.2f}"
     return sty.format(fmt, na_rep="—")
 
 # =========================
@@ -1983,72 +2037,7 @@ def _render_scorecard_table(round_data: pd.DataFrame):
         font-size:18px; font-weight:800; letter-spacing:.2px;
       }}
     
-  .hero {
-    padding: 16px 16px 12px 16px;
-    border-radius: 16px;
-    border: 1px solid rgba(255,255,255,0.10);
-    background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-    box-shadow: 0 12px 28px rgba(0,0,0,.22);
-    margin-top: 10px;
-    margin-bottom: 10px;
-  }
-  .hero-top {
-    display:flex;
-    justify-content: space-between;
-    align-items:flex-end;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-  .hero-title {
-    font-size: 1.25rem;
-    font-weight: 900;
-    letter-spacing: .2px;
-    margin: 0;
-  }
-  .hero-sub {
-    font-size: .9rem;
-    opacity: .85;
-    margin-top: 4px;
-  }
-  .tag {
-    display:inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.16);
-    background: rgba(255,255,255,0.06);
-    font-size: .78rem;
-    margin-right: 6px;
-    margin-bottom: 6px;
-    white-space: nowrap;
-  }
-  .compare-grid {
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 8px;
-  }
-  .compare-box {
-    border-radius: 14px;
-    border: 1px solid rgba(255,255,255,0.10);
-    background: rgba(0,0,0,0.18);
-    padding: 12px 12px 10px 12px;
-  }
-  .compare-h {
-    font-weight: 900;
-    margin: 0 0 6px 0;
-    letter-spacing: .2px;
-  }
-  .compare-row {
-    display:flex;
-    justify-content: space-between;
-    gap: 10px;
-    font-size: .9rem;
-    margin: 2px 0;
-  }
-  .compare-k {opacity:.82;}
-  .compare-v {font-weight: 800;}
-  .hint {opacity:.72; font-size:.85rem; margin-top: 4px;}
-</style>
+    </style>
 
     <div class="sc-wrap">
       <table class="sc-table">
@@ -2151,6 +2140,24 @@ elif mode == "📦 Slice Summary (Any View)":
     summary = build_summary(slice_for_summary)
     render_summary_cards(summary, title="📦 Current Slice — Summary")
     render_score_mix(slice_for_summary, title="📊 Score Mix — Current Slice (Counts + %)")
+
+
+    # =========================
+    # Overlay Player (same slice)
+    # =========================
+    with st.expander("🧑‍🤝‍🧑 Overlay another player (same slice filters)", expanded=False):
+        overlay_player = st.selectbox("Overlay Player", options=["— None —"] + players, index=0, key="slice_overlay_player")
+        if overlay_player and overlay_player != "— None —":
+            o_df = base_f[base_f["Player Name"] == overlay_player].copy()
+            if o_df.empty:
+                st.info("No rows for that player in the current slice filters.")
+            else:
+                curr_s = build_summary(slice_for_summary)
+                oth_s = build_summary(o_df)
+                comp_o = _compare_df(curr_s, oth_s)
+                st.dataframe(_style_compare_table(comp_o), use_container_width=True, hide_index=True)
+                st.caption("Overlay compares the current slice vs the selected player (same filters).")
+
 
     # =========================
     # Baseline Comparison
@@ -2689,7 +2696,7 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
     a_players = sorted([x for x in base_f["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
     a_default = sel_players if sel_players else a_players
 
-    a1, a2, a3, a4 = st.columns([2.2, 1.0, 1.0, 1.1])
+    a1, a2, a3, a4, a5 = st.columns([2.2, 1.0, 1.0, 1.1, 1.3])
     with a1:
         sel_a_players = st.multiselect("🎛️ Analytics — Players (optional)", options=a_players, default=a_default)
     with a2:
@@ -2699,9 +2706,21 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
     with a4:
         top_clubs = st.slider("Top Clubs (bar)", 6, 30, 18)
 
+    with a5:
+        compare_player = st.selectbox(
+            "Overlay Player (optional)",
+            options=["— None —"] + a_players,
+            index=0,
+            help="Overlay another player on the distance + club charts (same slice filters).",
+        )
+
     a_frame = base_f.copy()
     if sel_a_players:
         a_frame = a_frame[a_frame["Player Name"].isin(sel_a_players)].copy()
+
+    cmp_frame = pd.DataFrame()
+    if compare_player and compare_player != "— None —":
+        cmp_frame = base_f[base_f["Player Name"] == compare_player].copy()
 
     if a_frame.empty:
         st.warning("No rows match the analytics selection.")
@@ -2736,37 +2755,78 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
     # ✅ Quick Reference / Grounding block
     st.markdown("<div class='section-h'>Quick Reference — GIR Grounding</div>", unsafe_allow_html=True)
     ref = build_approach_reference_table(a_frame)
-    ref_view = ref[["Split", "GIR", "GIR%", "Attempts"]].copy()
+    ref_view = ref[["Split", "GIR", "GIR%", "Score to Par"]].copy()
+    # Friendly formatting (avg score relative to par per hole)
+    if "Score to Par" in ref_view.columns:
+        ref_view["Score to Par"] = ref_view["Score to Par"].apply(_fmt_to_par)
     st.dataframe(_style_pct_table(ref_view, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
 
     # A) Distance buckets
     st.markdown("<div class='section-h'>A) GIR by Distance Bucket</div>", unsafe_allow_html=True)
     dist_g = build_gir_by_distance(a_frame, min_attempts=min_attempts)
+    if cmp_frame is not None and not cmp_frame.empty:
+        dist_g2 = build_gir_by_distance(cmp_frame, min_attempts=min_attempts)
+        if not dist_g2.empty:
+            dist_g2 = dist_g2.copy()
+            dist_g2["Group"] = str(compare_player)
+        if not dist_g.empty:
+            dist_g = dist_g.copy()
+            dist_g["Group"] = "Primary"
+        dist_g = pd.concat([d for d in [dist_g, dist_g2] if d is not None and not d.empty], ignore_index=True)
     _line_chart_distance_gir(dist_g)
 
     # B) Clubs
     st.markdown("<div class='section-h'>B) GIR by Club</div>", unsafe_allow_html=True)
     club_g = build_gir_by_club(a_frame, min_attempts=min_attempts)
+    if cmp_frame is not None and not cmp_frame.empty:
+        club_g2 = build_gir_by_club(cmp_frame, min_attempts=min_attempts)
+        if not club_g2.empty:
+            club_g2 = club_g2.copy()
+            club_g2["Group"] = str(compare_player)
+        if not club_g.empty:
+            club_g = club_g.copy()
+            club_g["Group"] = "Primary"
+        club_g = pd.concat([d for d in [club_g, club_g2] if d is not None and not d.empty], ignore_index=True)
     _bar_chart_club_gir(club_g, top_n=top_clubs)
 
     # Best of both worlds (heatmap)
     st.markdown("<div class='section-h'>Best of both worlds) Distance × Club Heatmap (GIR%)</div>", unsafe_allow_html=True)
     heat = build_gir_heatmap_distance_x_club(a_frame, min_cell_attempts=min_cell)
-    _heatmap_distance_x_club(heat)
+    if cmp_frame is not None and not cmp_frame.empty:
+        heat2 = build_gir_heatmap_distance_x_club(cmp_frame, min_cell_attempts=min_cell)
+        hL, hR = st.columns(2)
+        with hL:
+            st.markdown("**Primary**")
+            _heatmap_distance_x_club(heat)
+        with hR:
+            st.markdown(f"**Overlay: {compare_player}**")
+            _heatmap_distance_x_club(heat2)
+        # Keep primary heat in variable for exports/expanders below
+    else:
+        _heatmap_distance_x_club(heat)
 
     with st.expander("Show tables (distance / club / heatmap)", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Distance buckets**")
-            dtab = dist_g[["Dist Bucket","Qty","GIR%","Attempts"]].copy() if not dist_g.empty else pd.DataFrame()
+            dtab = dist_g[["Dist Bucket","Qty","GIR%","Attempts","ToPar/Hole"]].copy() if not dist_g.empty else pd.DataFrame()
+            if not dtab.empty and "ToPar/Hole" in dtab.columns:
+                dtab["Score to Par"] = dtab["ToPar/Hole"].apply(_fmt_to_par)
+                dtab = dtab.drop(columns=["ToPar/Hole"])
             st.dataframe(_style_pct_table(dtab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
         with c2:
             st.markdown("**Clubs**")
-            ctab = club_g[["Club","Qty","GIR%","Attempts"]].head(top_clubs).copy() if not club_g.empty else pd.DataFrame()
+            ctab = club_g[["Club","Qty","GIR%","Attempts","ToPar/Hole"]].head(top_clubs).copy() if not club_g.empty else pd.DataFrame()
+            if not ctab.empty and "ToPar/Hole" in ctab.columns:
+                ctab["Score to Par"] = ctab["ToPar/Hole"].apply(_fmt_to_par)
+                ctab = ctab.drop(columns=["ToPar/Hole"])
             st.dataframe(_style_pct_table(ctab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
 
         st.markdown("**Heatmap cells**")
-        htab = heat[["Dist Bucket","Club","Qty","GIR%","Attempts"]].copy() if not heat.empty else pd.DataFrame()
+        htab = heat[["Dist Bucket","Club","Qty","GIR%","Attempts","ToPar/Hole"]].copy() if not heat.empty else pd.DataFrame()
+        if not htab.empty and "ToPar/Hole" in htab.columns:
+            htab["Score to Par"] = htab["ToPar/Hole"].apply(_fmt_to_par)
+            htab = htab.drop(columns=["ToPar/Hole"])
         st.dataframe(_style_pct_table(htab, pct_cols=("GIR%",)), hide_index=True, use_container_width=True)
 
     with st.expander("📤 Export Approach tables (CSV)", expanded=False):
@@ -2792,6 +2852,732 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
                 file_name="approach_gir_heatmap_cells.csv",
                 mime="text/csv",
             )
+
+elif mode == "⛳ Putting Proximity (Validation)":
+    st.subheader("⛳ Putting Proximity Table — Validation")
+
+    # Start from the current filtered slice (f), then apply putting-specific rules/filters below
+    dfp = f.copy()
+
+    # Ensure date/year
+    dfp["Date Played"] = pd.to_datetime(dfp.get("Date Played"), errors="coerce")
+    dfp["Year"] = dfp["Date Played"].dt.year
+
+    # Soft safety for required columns
+    for col in [
+        "Player Name", "Course Name", "Hole", "Par", "Putts",
+        PROX_COL, YARD_COL, CLUB_COL, "3 Putt Bogey",
+        "GIR", "Approach GIR",
+        FEET_MADE_COL, SCORE_COL,
+    ]:
+        if col not in dfp.columns:
+            dfp[col] = pd.NA
+
+    # Normalize GIR fields (allow values like 1/0, True/False, Yes/No)
+    dfp["GIR"] = dfp["GIR"].apply(_norm_yes_no)
+    dfp["Approach GIR"] = dfp["Approach GIR"].apply(_norm_yes_no)
+
+    # Numeric parsing
+    dfp["Putts"] = _as_int(dfp["Putts"], 0)
+    dfp["Hole"] = _as_int(dfp["Hole"], 0)
+
+    par_num = pd.to_numeric(dfp.get("Par"), errors="coerce").round()
+    dfp["Par"] = par_num.where(par_num.isin([3, 4, 5]), pd.NA).astype("Int64")
+
+    dfp["HoleScoreN"] = pd.to_numeric(dfp[SCORE_COL], errors="coerce")
+    dfp["ProxN"] = pd.to_numeric(dfp[PROX_COL], errors="coerce")  # keep NaN if blank
+    dfp["YardN"] = pd.to_numeric(dfp[YARD_COL], errors="coerce")
+    dfp["FeetMadeN"] = pd.to_numeric(dfp[FEET_MADE_COL], errors="coerce")
+    dfp["3 Putt Bogey"] = _as_int(dfp["3 Putt Bogey"], 0)
+
+    # ---------------------------
+    # Filters (local to this view)
+    # ---------------------------
+    years_available = sorted([int(y) for y in dfp["Year"].dropna().unique().tolist()])
+    year_options = ["All"] + years_available
+    sel_year = st.selectbox("Year", year_options, index=0)
+
+    if sel_year != "All":
+        dfp = dfp[dfp["Year"] == int(sel_year)].copy()
+
+    if dfp.empty:
+        st.warning("No rows found for the selected year.")
+        st.stop()
+
+    yr_text = "All Years" if sel_year == "All" else f"Year={sel_year}"
+    st.caption(f"Showing: {yr_text} (based on your current top-level filters)")
+
+    c1, c2, c3, c4 = st.columns([1.6, 1.8, 1.2, 2.0], vertical_alignment="bottom")
+    with c1:
+        players = sorted([x for x in dfp["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
+        sel_player = st.selectbox("Player", ["All"] + players, key="pp_player")
+    with c2:
+        courses = sorted([x for x in dfp["Course Name"].dropna().unique().tolist() if str(x).strip() != ""])
+        sel_course = st.selectbox("Course", ["All"] + courses, key="pp_course")
+    with c3:
+        pars = [3, 4, 5]
+        sel_pars = st.multiselect("Par", pars, default=pars, key="pp_pars")
+    with c4:
+        clubs = sorted([x for x in dfp[CLUB_COL].dropna().unique().tolist() if str(x).strip() != ""])
+        sel_clubs = st.multiselect("Approach Club", clubs, default=[], key="pp_clubs")
+        sel_gir = st.selectbox("GIR", ["All", "Yes", "No"], key="pp_gir")
+        sel_appr_gir = st.selectbox("Approach GIR", ["All", "Yes", "No"], key="pp_agir")
+
+    c5, c6 = st.columns([2.2, 1.8], vertical_alignment="bottom")
+    with c5:
+        holes = sorted([int(x) for x in dfp["Hole"].dropna().unique().tolist() if int(x) > 0])
+        sel_holes = st.multiselect("Hole Number", holes, default=[], key="pp_holes")
+    with c6:
+        yard_series = dfp["YardN"].dropna()
+        y_min = int(yard_series.min()) if not yard_series.empty else 0
+        y_max = int(yard_series.max()) if not yard_series.empty else 300
+        y_low, y_high = st.slider(
+            "Approach Yardage Range",
+            min_value=0,
+            max_value=max(1, y_max),
+            value=(max(0, y_min), y_max),
+            key="pp_yards",
+        )
+
+    g = dfp.copy()
+    if sel_player != "All":
+        g = g[g["Player Name"] == sel_player]
+    if sel_course != "All":
+        g = g[g["Course Name"] == sel_course]
+    if sel_pars:
+        g = g[g["Par"].isin(sel_pars)]
+    if sel_clubs:
+        g = g[g[CLUB_COL].isin(sel_clubs)]
+    if sel_holes:
+        g = g[g["Hole"].isin(sel_holes)]
+    if sel_gir != "All":
+        g = g[g["GIR"] == sel_gir]
+    if sel_appr_gir != "All":
+        g = g[g["Approach GIR"] == sel_appr_gir]
+
+    # Yardage filter: keep blanks (do not exclude missing yardage)
+    g = g[(g["YardN"].isna()) | ((g["YardN"] >= y_low) & (g["YardN"] <= y_high))].copy()
+
+    # ---------------------------
+    # DATASET RULES
+    # ---------------------------
+    # Remove hole-outs entirely (Putts == 0)
+    # Exclude blanks in proximity, and exclude them from the dataset itself
+    g = g[(g["Putts"] > 0) & (g["ProxN"].notna())].copy()
+
+    if g.empty:
+        st.info("No rows match filters after removing hole-outs and blank proximity.")
+        st.stop()
+
+    # ---------------------------
+    # Bucket table
+    # ---------------------------
+    BUCKET_ORDER = ["0–3 ft", "3–6 ft", "6–10 ft", "10–16 ft", "16–22 ft", "23–30 ft", "30–40 ft", "> 40 ft"]
+
+    def build_putting_prox_table(frame: pd.DataFrame) -> pd.DataFrame:
+        tmp = frame.copy()
+        tmp["PuttsN"] = _as_int(tmp["Putts"], 0)
+        tmp["FeetMadeN"] = pd.to_numeric(tmp["FeetMadeN"], errors="coerce")
+        tmp["ParN"] = pd.to_numeric(tmp["Par"], errors="coerce")
+        tmp["HoleScoreN"] = pd.to_numeric(tmp["HoleScoreN"], errors="coerce")
+
+        buckets = [
+            ("0–3 ft",   (tmp["ProxN"] >= 0) & (tmp["ProxN"] <= 3)),
+            ("3–6 ft",   (tmp["ProxN"] > 3) & (tmp["ProxN"] <= 6)),
+            ("6–10 ft",  (tmp["ProxN"] > 6) & (tmp["ProxN"] <= 10)),
+            ("10–16 ft", (tmp["ProxN"] > 10) & (tmp["ProxN"] <= 16)),
+            ("16–22 ft", (tmp["ProxN"] > 16) & (tmp["ProxN"] <= 22)),
+            ("23–30 ft", (tmp["ProxN"] > 22) & (tmp["ProxN"] <= 30)),
+            ("30–40 ft", (tmp["ProxN"] > 30) & (tmp["ProxN"] <= 40)),
+            ("> 40 ft",  (tmp["ProxN"] > 40)),
+        ]
+
+        # DEBUG: show any rows that don't land in a bucket
+        all_bucket_mask = False
+        for _, m in buckets:
+            all_bucket_mask = all_bucket_mask | m
+
+        not_bucketed = tmp[~all_bucket_mask].copy()
+        if len(not_bucketed) > 0:
+            st.warning(f"⚠️ {len(not_bucketed)} row(s) have ProxN that don't match any bucket.")
+            st.dataframe(
+                not_bucketed[["Date Played", "Player Name", "Course Name", "Hole", "PuttsN", "ProxN", "FeetMadeN", "HoleScoreN"]]
+                .sort_values(["Date Played", "Hole"]),
+                use_container_width=True,
+                hide_index=True
+            )
+
+        rows = []
+        for label, mask in buckets:
+            b = tmp[mask].copy()
+
+            holes = int(len(b))
+            total_putts = int(b["PuttsN"].sum())
+
+            p1 = int((b["PuttsN"] == 1).sum())
+            p2 = int((b["PuttsN"] == 2).sum())
+            p3p = int((b["PuttsN"] >= 3).sum())
+            bog3 = int(_as_int(b["3 Putt Bogey"], 0).sum())
+
+            feet_made_total = float(_n(b["FeetMadeN"], 0).sum())
+            feet_made_per_hole = (feet_made_total / holes) if holes else 0.0
+
+            valid_ctx = b["HoleScoreN"].notna() & b["ParN"].notna()
+            strokes_to_green = (b["HoleScoreN"] - b["PuttsN"])
+
+            birdie_att_mask = valid_ctx & (strokes_to_green <= (b["ParN"] - 2))
+            birdie_attempts = int(birdie_att_mask.sum())
+            birdie_make_mask = valid_ctx & (b["HoleScoreN"] <= (b["ParN"] - 1))
+            birdie_makes = int((birdie_att_mask & birdie_make_mask).sum())
+
+            par_att_mask = valid_ctx & (strokes_to_green == (b["ParN"] - 1))
+            par_attempts = int(par_att_mask.sum())
+            par_make_mask = valid_ctx & (b["HoleScoreN"] == b["ParN"])
+            par_makes = int((par_att_mask & par_make_mask).sum())
+
+            rows.append({
+                "Bucket": label,
+                "Holes": holes,
+                "Putts (Total)": total_putts,
+
+                "1-putts": p1,
+                "1-putt %": round(_pct(p1, holes), 1),
+
+                "2-putts": p2,
+                "2-putt %": round(_pct(p2, holes), 1),
+
+                "3+ putts": p3p,
+                "3+ putt %": round(_pct(p3p, holes), 1),
+
+                "3-putt bogeys": bog3,
+                "3-putt bogey %": round(_pct(bog3, holes), 1),
+
+                "Birdie+ Attempts": birdie_attempts,
+                "Birdie+ Makes": birdie_makes,
+                "Birdie+ %": round(_pct(birdie_makes, birdie_attempts), 1),
+
+                "Par Attempts": par_attempts,
+                "Par Makes": par_makes,
+                "Par %": round(_pct(par_makes, par_attempts), 1),
+
+                "Feet Made (Total)": round(feet_made_total, 1),
+                "Feet Made / Hole": round(feet_made_per_hole, 2),
+            })
+
+        out = pd.DataFrame(rows)
+        out["Bucket"] = pd.Categorical(out["Bucket"], categories=BUCKET_ORDER, ordered=True)
+        out = out.sort_values("Bucket").reset_index(drop=True)
+
+        # Totals row
+        if not out.empty:
+            total_row = {"Bucket": "TOTAL"}
+            for c in out.columns:
+                if c != "Bucket":
+                    total_row[c] = float(out[c].sum())
+
+            total_holes = int(total_row["Holes"]) if total_row["Holes"] else 0
+            total_row["1-putt %"] = round(_pct(int(total_row["1-putts"]), total_holes), 1)
+            total_row["2-putt %"] = round(_pct(int(total_row["2-putts"]), total_holes), 1)
+            total_row["3+ putt %"] = round(_pct(int(total_row["3+ putts"]), total_holes), 1)
+            total_row["3-putt bogey %"] = round(_pct(int(total_row["3-putt bogeys"]), total_holes), 1)
+
+            total_ba = int(total_row["Birdie+ Attempts"])
+            total_bm = int(total_row["Birdie+ Makes"])
+            total_row["Birdie+ %"] = round(_pct(total_bm, total_ba), 1)
+
+            total_pa = int(total_row["Par Attempts"])
+            total_pm = int(total_row["Par Makes"])
+            total_row["Par %"] = round(_pct(total_pm, total_pa), 1)
+
+            feet_total = float(total_row["Feet Made (Total)"])
+            total_row["Feet Made / Hole"] = round((feet_total / total_holes) if total_holes else 0.0, 2)
+
+            out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
+        return out
+
+    st.caption(
+        f"Rules: {yr_text} • Hole-outs removed (Putts=0 excluded) • Blank proximity rows excluded • "
+        "Buckets based on first-putt proximity • Totals shown in-table."
+    )
+
+    table = build_putting_prox_table(g)
+
+    # ---------------------------
+    # Table styling
+    # ---------------------------
+    def _pct_str(x):
+        try:
+            return f"{float(x):.1f}%"
+        except:
+            return "—"
+
+    percent_cols = ["1-putt %", "2-putt %", "3+ putt %", "3-putt bogey %", "Birdie+ %", "Par %"]
+
+    table_display = table.copy()
+    for col in percent_cols:
+        table_display[col] = table_display[col].apply(_pct_str)
+
+    def _style_putting_table(df_show: pd.DataFrame):
+        def total_row_style(row):
+            if str(row.get("Bucket", "")) == "TOTAL":
+                return ["font-weight: 900; background-color: rgba(255,255,255,0.14); border-top: 2px solid rgba(255,255,255,0.35);"] * len(row)
+            return [""] * len(row)
+
+        def zebra_rows(row):
+            idx = row.name
+            base = "background-color: rgba(255,255,255,0.04);" if idx % 2 == 0 else "background-color: rgba(0,0,0,0.00);"
+            return [base] * len(row)
+
+        def pct_badge(val):
+            try:
+                v = float(str(val).replace("%", ""))
+            except:
+                return ""
+            if v >= 60:
+                return "background-color: rgba(46, 204, 113, 0.35); color: white; font-weight: 900;"
+            if v >= 40:
+                return "background-color: rgba(241, 196, 15, 0.28); color: white; font-weight: 900;"
+            return "background-color: rgba(231, 76, 60, 0.26); color: white; font-weight: 900;"
+
+        def feet_badge(val):
+            try:
+                v = float(val)
+            except:
+                return ""
+            if v >= 3.0:
+                return "background-color: rgba(52, 152, 219, 0.35); color: white; font-weight: 900;"
+            if v >= 1.5:
+                return "background-color: rgba(52, 152, 219, 0.22); color: white; font-weight: 900;"
+            return "background-color: rgba(52, 152, 219, 0.10); color: white; font-weight: 800;"
+
+        sty = (
+            df_show.style
+            .apply(zebra_rows, axis=1)
+            .apply(total_row_style, axis=1)
+            .set_properties(**{"text-align": "right", "padding": "6px 10px"})
+            .set_properties(subset=["Bucket"], **{"text-align": "left", "font-weight": "900"})
+            .applymap(pct_badge, subset=percent_cols)
+            .applymap(feet_badge, subset=["Feet Made / Hole"])
+            .format({
+                "Holes": "{:,.0f}",
+                "Putts (Total)": "{:,.0f}",
+                "1-putts": "{:,.0f}",
+                "2-putts": "{:,.0f}",
+                "3+ putts": "{:,.0f}",
+                "3-putt bogeys": "{:,.0f}",
+                "Birdie+ Attempts": "{:,.0f}",
+                "Birdie+ Makes": "{:,.0f}",
+                "Par Attempts": "{:,.0f}",
+                "Par Makes": "{:,.0f}",
+                "Feet Made (Total)": "{:,.1f}",
+                "Feet Made / Hole": "{:,.2f}",
+            })
+        )
+        return sty
+
+    st.dataframe(_style_putting_table(table_display), use_container_width=True, hide_index=True)
+
+    # ---------------------------
+    # Visual aid: Metric by distance
+    # ---------------------------
+    st.subheader("📊 Metric by Distance")
+
+    metric = st.radio(
+        "Metric",
+        options=[
+            "Make % (1-putt %)",
+            "Birdie+ %",
+            "Par %",
+            "3+ putt %",
+            "3-putt bogey %",
+        ],
+        horizontal=True,
+        key="pp_metric",
+    )
+
+    metric_map = {
+        "Make % (1-putt %)": "1-putt %",
+        "Birdie+ %": "Birdie+ %",
+        "Par %": "Par %",
+        "3+ putt %": "3+ putt %",
+        "3-putt bogey %": "3-putt bogey %",
+    }
+    metric_col = metric_map[metric]
+
+    chart_df = table[table["Bucket"] != "TOTAL"][["Bucket", metric_col]].copy()
+    chart_df["Bucket"] = pd.Categorical(chart_df["Bucket"], categories=BUCKET_ORDER, ordered=True)
+    chart_df = chart_df.sort_values("Bucket")
+
+    chart_plot = chart_df.rename(columns={metric_col: "Value"}).copy()
+
+    metric_counts = {
+        "Make % (1-putt %)": ("1-putts", "Holes"),
+        "Birdie+ %": ("Birdie+ Makes", "Birdie+ Attempts"),
+        "Par %": ("Par Makes", "Par Attempts"),
+        "3+ putt %": ("3+ putts", "Holes"),
+        "3-putt bogey %": ("3-putt bogeys", "Holes"),
+    }
+    num_col, den_col = metric_counts[metric]
+
+    counts_df = table[table["Bucket"] != "TOTAL"][["Bucket", num_col, den_col]].copy()
+    counts_df["Bucket"] = pd.Categorical(counts_df["Bucket"], categories=BUCKET_ORDER, ordered=True)
+    counts_df = counts_df.sort_values("Bucket")
+
+    chart_plot = chart_plot.merge(counts_df, on="Bucket", how="left")
+
+    def _label_row(r):
+        try:
+            num = int(r[num_col])
+            den = int(r[den_col])
+            val = float(r["Value"])
+            return f"{num}/{den} {val:.1f}%"
+        except:
+            return "—"
+
+    chart_plot["Label"] = chart_plot.apply(_label_row, axis=1)
+
+    base = alt.Chart(chart_plot).encode(
+        x=alt.X("Bucket:N", sort=BUCKET_ORDER, title=None),
+        tooltip=[
+            alt.Tooltip("Bucket:N", title="Bucket"),
+            alt.Tooltip("Value:Q", title=metric, format=".1f"),
+            alt.Tooltip(num_col + ":Q", title="Makes", format=",.0f"),
+            alt.Tooltip(den_col + ":Q", title="Attempts", format=",.0f"),
+        ],
+    )
+
+    if metric in ["3+ putt %", "3-putt bogey %"]:
+        bar_color = "#EF4444"
+        line_color = "#F97316"
+    else:
+        bar_color = "#3B82F6"
+        line_color = "#22C55E"
+
+    bars = base.mark_bar(
+        cornerRadiusTopLeft=7,
+        cornerRadiusTopRight=7,
+        opacity=0.95,
+    ).encode(
+        y=alt.Y("Value:Q", title=None),
+        color=alt.value(bar_color),
+    )
+
+    line = base.mark_line(strokeWidth=3, opacity=0.9).encode(
+        y="Value:Q",
+        color=alt.value(line_color),
+    )
+
+    points = base.mark_point(size=120, filled=True, opacity=0.95).encode(
+        y="Value:Q",
+        color=alt.value(line_color),
+    )
+
+    labels = base.mark_text(
+        dy=-10,
+        fontSize=13,
+        fontWeight="bold",
+        color="white"
+    ).encode(
+        y="Value:Q",
+        text="Label:N"
+    )
+
+    chart = (bars + line + points + labels).properties(height=380).configure_view(
+        strokeOpacity=0
+    ).configure_axis(
+        labelColor="white",
+        titleColor="white",
+        gridColor="rgba(255,255,255,0.10)",
+        tickColor="rgba(255,255,255,0.20)",
+        domainColor="rgba(255,255,255,0.20)",
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
+    # ---------------------------
+    # Visual aid: Make % vs 3-Putt % by distance
+    # ---------------------------
+    st.subheader("⚔️ Make % vs 3-Putt % by Distance")
+
+    compare_df = table[table["Bucket"] != "TOTAL"][["Bucket", "1-putt %", "3+ putt %", "Holes", "1-putts", "3+ putts"]].copy()
+    compare_df["Bucket"] = pd.Categorical(compare_df["Bucket"], categories=BUCKET_ORDER, ordered=True)
+    compare_df = compare_df.sort_values("Bucket")
+
+    long_df = compare_df.melt(
+        id_vars=["Bucket", "Holes", "1-putts", "3+ putts"],
+        value_vars=["1-putt %", "3+ putt %"],
+        var_name="Metric",
+        value_name="Value"
+    )
+
+    metric_name = {
+        "1-putt %": "Make % (1-putt %)",
+        "3+ putt %": "3-Putt % (3+ putt %)"
+    }
+    long_df["Metric"] = long_df["Metric"].map(metric_name)
+
+    def _mk_label(r):
+        try:
+            if str(r["Metric"]).startswith("Make"):
+                num = int(r["1-putts"])
+                den = int(r["Holes"])
+            else:
+                num = int(r["3+ putts"])
+                den = int(r["Holes"])
+            return f"{num}/{den} {float(r['Value']):.1f}%"
+        except:
+            return "—"
+
+    long_df["Label"] = long_df.apply(_mk_label, axis=1)
+
+    base2 = alt.Chart(long_df).encode(
+        x=alt.X("Bucket:N", sort=BUCKET_ORDER, title=None),
+        y=alt.Y("Value:Q", title=None),
+        color=alt.Color(
+            "Metric:N",
+            legend=alt.Legend(title=None, orient="top"),
+            scale=alt.Scale(range=["#22C55E", "#EF4444"])
+        ),
+        tooltip=[
+            alt.Tooltip("Bucket:N", title="Bucket"),
+            alt.Tooltip("Metric:N", title="Metric"),
+            alt.Tooltip("Value:Q", title="%", format=".1f"),
+            alt.Tooltip("Holes:Q", title="Holes", format=",.0f"),
+            alt.Tooltip("1-putts:Q", title="1-putts", format=",.0f"),
+            alt.Tooltip("3+ putts:Q", title="3+ putts", format=",.0f"),
+        ],
+    )
+
+    lines2 = base2.mark_line(strokeWidth=4, opacity=0.9)
+    points2 = base2.mark_point(size=140, filled=True, opacity=0.95)
+
+    labels2 = base2.mark_text(
+        dy=-12,
+        fontSize=12,
+        fontWeight="bold",
+        color="white"
+    ).encode(
+        text="Label:N"
+    )
+
+    chart2 = (lines2 + points2 + labels2).properties(height=360).configure_view(
+        strokeOpacity=0
+    ).configure_axis(
+        labelColor="white",
+        titleColor="white",
+        gridColor="rgba(255,255,255,0.10)",
+        tickColor="rgba(255,255,255,0.20)",
+        domainColor="rgba(255,255,255,0.20)",
+    )
+
+    st.altair_chart(chart2, use_container_width=True)
+
+    # ---------------------------
+    # Visual aid: Attempts by Distance (bars) + Make % (line + dots + label)
+    # ---------------------------
+    st.subheader("📈 Attempts by Distance (Bars) + Make % (Line + Dots)")
+
+    att_df = table[table["Bucket"] != "TOTAL"][["Bucket", "Holes", "1-putts", "1-putt %"]].copy()
+    att_df["Bucket"] = pd.Categorical(att_df["Bucket"], categories=BUCKET_ORDER, ordered=True)
+    att_df = att_df.sort_values("Bucket")
+
+    att_df["Label"] = att_df.apply(
+        lambda r: f"{int(r['1-putts'])}/{int(r['Holes'])} {float(r['1-putt %']):.1f}%" if int(r["Holes"]) else "—",
+        axis=1
+    )
+
+    base3 = alt.Chart(att_df).encode(
+        x=alt.X("Bucket:N", sort=BUCKET_ORDER, title=None),
+        tooltip=[
+            alt.Tooltip("Bucket:N", title="Bucket"),
+            alt.Tooltip("Holes:Q", title="Attempts (Holes)", format=",.0f"),
+            alt.Tooltip("1-putts:Q", title="Makes (1-putts)", format=",.0f"),
+            alt.Tooltip("1-putt %:Q", title="Make %", format=".1f"),
+        ],
+    )
+
+    bars3 = base3.mark_bar(
+        cornerRadiusTopLeft=7,
+        cornerRadiusTopRight=7,
+        opacity=0.90
+    ).encode(
+        y=alt.Y("Holes:Q", title="Attempts (Holes)"),
+        color=alt.value("#60A5FA"),
+    )
+
+    line3 = base3.mark_line(
+        strokeWidth=4,
+        opacity=0.9
+    ).encode(
+        y=alt.Y("1-putt %:Q", title="Make % (1-putt %)", axis=alt.Axis(orient="right")),
+        color=alt.value("#22C55E"),
+    )
+
+    points3 = base3.mark_point(
+        size=160,
+        filled=True,
+        opacity=0.95
+    ).encode(
+        y=alt.Y("1-putt %:Q", axis=alt.Axis(orient="right")),
+        color=alt.value("#22C55E"),
+    )
+
+    labels3 = base3.mark_text(
+        dx=10,
+        dy=-8,
+        fontSize=12,
+        fontWeight="bold",
+        color="white"
+    ).encode(
+        y=alt.Y("1-putt %:Q", axis=alt.Axis(orient="right")),
+        text="Label:N"
+    )
+
+    chart3 = alt.layer(bars3, line3, points3, labels3).resolve_scale(
+        y="independent"
+    ).properties(height=380).configure_view(
+        strokeOpacity=0
+    ).configure_axis(
+        labelColor="white",
+        titleColor="white",
+        gridColor="rgba(255,255,255,0.10)",
+        tickColor="rgba(255,255,255,0.20)",
+        domainColor="rgba(255,255,255,0.20)",
+    )
+
+    st.altair_chart(chart3, use_container_width=True)
+
+    # ---------------------------
+    # Overlay: Make % by Distance (multi-player comparison)
+    # ---------------------------
+    st.subheader("📉 Overlay — Make % by Distance (Multi-Player)")
+
+    # Build an overlay dataset using ALL players (same filters, except player)
+    ov = dfp.copy()
+
+    # Apply same non-player filters
+    if sel_course != "All":
+        ov = ov[ov["Course Name"] == sel_course]
+    if sel_pars:
+        ov = ov[ov["Par"].isin(sel_pars)]
+    if sel_clubs:
+        ov = ov[ov[CLUB_COL].isin(sel_clubs)]
+    if sel_holes:
+        ov = ov[ov["Hole"].isin(sel_holes)]
+    if sel_gir != "All":
+        ov = ov[ov["GIR"] == sel_gir]
+    if sel_appr_gir != "All":
+        ov = ov[ov["Approach GIR"] == sel_appr_gir]
+
+    # Yardage filter: keep blanks (do not exclude missing yardage)
+    ov = ov[(ov["YardN"].isna()) | ((ov["YardN"] >= y_low) & (ov["YardN"] <= y_high))].copy()
+
+    # Same dataset rules (remove hole-outs + require proximity)
+    ov = ov[(ov["Putts"] > 0) & (ov["ProxN"].notna())].copy()
+
+    ov_players = sorted([x for x in ov["Player Name"].dropna().unique().tolist() if str(x).strip() != ""])
+    default_overlay = []
+    if sel_player != "All" and sel_player in ov_players:
+        default_overlay = [sel_player]
+    elif len(ov_players) >= 2:
+        default_overlay = ov_players[:2]
+    elif len(ov_players) == 1:
+        default_overlay = ov_players
+
+    overlay_players = st.multiselect(
+        "Overlay Players (line per player)",
+        options=ov_players,
+        default=default_overlay,
+        help="Uses the same filters above (Course/Par/Club/Yardage/GIR), but lets you compare multiple players at once."
+    )
+
+    def _make_pct_overlay(frame: pd.DataFrame) -> pd.DataFrame:
+        tmp = frame.copy()
+        tmp["PuttsN"] = _as_int(tmp["Putts"], 0)
+
+        buckets = [
+            ("0–3 ft",   (tmp["ProxN"] >= 0) & (tmp["ProxN"] <= 3)),
+            ("3–6 ft",   (tmp["ProxN"] > 3) & (tmp["ProxN"] <= 6)),
+            ("6–10 ft",  (tmp["ProxN"] > 6) & (tmp["ProxN"] <= 10)),
+            ("10–16 ft", (tmp["ProxN"] > 10) & (tmp["ProxN"] <= 16)),
+            ("16–22 ft", (tmp["ProxN"] > 16) & (tmp["ProxN"] <= 22)),
+            ("23–30 ft", (tmp["ProxN"] > 22) & (tmp["ProxN"] <= 30)),
+            ("30–40 ft", (tmp["ProxN"] > 30) & (tmp["ProxN"] <= 40)),
+            ("> 40 ft",  (tmp["ProxN"] > 40)),
+        ]
+
+        out_rows = []
+        for label, mask in buckets:
+            b = tmp[mask].copy()
+            holes = int(len(b))
+            makes = int((b["PuttsN"] == 1).sum())
+            pct = (makes / holes * 100.0) if holes else 0.0
+            out_rows.append({"Bucket": label, "Holes": holes, "1-putts": makes, "Make %": round(pct, 1)})
+
+        out = pd.DataFrame(out_rows)
+        out["Bucket"] = pd.Categorical(out["Bucket"], categories=BUCKET_ORDER, ordered=True)
+        out = out.sort_values("Bucket").reset_index(drop=True)
+        return out
+
+    if len(overlay_players) < 1:
+        st.info("Select at least one player to overlay.")
+    else:
+        ov_plot_parts = []
+        for p in overlay_players:
+            pv = ov[ov["Player Name"] == p].copy()
+            if pv.empty:
+                continue
+            ptab = _make_pct_overlay(pv)
+            ptab["Player"] = p
+            ov_plot_parts.append(ptab)
+
+        if not ov_plot_parts:
+            st.info("No overlay data available for the selected filters.")
+        else:
+            ov_plot = pd.concat(ov_plot_parts, ignore_index=True)
+
+            # Pretty labels: "makes/holes pct"
+            ov_plot["Label"] = ov_plot.apply(
+                lambda r: f"{int(r['1-putts'])}/{int(r['Holes'])} {float(r['Make %']):.1f}%" if int(r["Holes"]) else "—",
+                axis=1
+            )
+
+            base_ov = alt.Chart(ov_plot).encode(
+                x=alt.X("Bucket:N", sort=BUCKET_ORDER, title=None),
+                y=alt.Y("Make %:Q", title="Make % (1-putt %)"),
+                color=alt.Color("Player:N", legend=alt.Legend(title=None, orient="top")),
+                tooltip=[
+                    alt.Tooltip("Player:N", title="Player"),
+                    alt.Tooltip("Bucket:N", title="Bucket"),
+                    alt.Tooltip("Make %:Q", title="Make %", format=".1f"),
+                    alt.Tooltip("1-putts:Q", title="1-putts", format=",.0f"),
+                    alt.Tooltip("Holes:Q", title="Attempts (holes)", format=",.0f"),
+                ],
+            )
+
+            lines_ov = base_ov.mark_line(strokeWidth=4, opacity=0.9)
+            points_ov = base_ov.mark_point(size=150, filled=True, opacity=0.95)
+
+            labels_ov = base_ov.mark_text(
+                dy=-12,
+                fontSize=12,
+                fontWeight="bold",
+                color="white"
+            ).encode(text="Label:N")
+
+            chart_ov = (lines_ov + points_ov + labels_ov).properties(height=380).configure_view(
+                strokeOpacity=0
+            ).configure_axis(
+                labelColor="white",
+                titleColor="white",
+                gridColor="rgba(255,255,255,0.10)",
+                tickColor="rgba(255,255,255,0.20)",
+                domainColor="rgba(255,255,255,0.20)",
+            )
+
+            st.altair_chart(chart_ov, use_container_width=True)
+
 
 else:
     st.warning("Unknown mode selection.")
