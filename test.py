@@ -353,10 +353,17 @@ slice_for_summary = f.copy()
 # =========================
 # Mode selector
 # =========================
+
 st.subheader("Mode")
+
+# Default to a gentler landing page
+if "mode" not in st.session_state:
+    st.session_state["mode"] = "🏠 Home (Start Here)"
+
 mode = st.radio(
     "Choose what to render for the current slice",
     [
+        "🏠 Home (Start Here)",
         "📦 Slice Summary (Any View)",
         "🆚 Baseline Compare Dashboard",
         "🧾 Round Scorecard (by Round Link)",
@@ -367,7 +374,8 @@ mode = st.radio(
         "📈 Approach Analytics (Distance + Club + Heatmap)",
         "⛳ Putting Proximity (Validation)"
     ],
-    horizontal=True
+    horizontal=True,
+    key="mode",
 )
 
 # =========================
@@ -2134,7 +2142,61 @@ if mode == "🆚 Baseline Compare Dashboard":
         title="🆚 Baseline Compare Dashboard — Full"
     )
 
-elif mode == "📦 Slice Summary (Any View)":
+# =========================
+# Home (gentle landing)
+# =========================
+if mode == "🏠 Home (Start Here)":
+    st.markdown("<div class='dash-wrap'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        "<div class='dash-card'>"
+        "<div class='dash-title'>🏠 Golf Slicer — Start Here</div>"
+        "<div class='dash-sub'>Pick a view below. Your filters on the left/top still define the slice.</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Quick snapshot of the current slice (based on the already-filtered frame 'f')
+    snap = build_summary(f)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Holes", f"{snap['holes_played']:,}")
+    c2.metric("Score", f"{snap['score_total']:,} ({_fmt_to_par(snap['to_par'])})")
+    c3.metric("Putts", f"{snap['putts_total']:,}", delta=f"{snap['putts_per_18']:.1f}/18")
+    c4.metric("GIR%", f"{snap['gir_pct']:.1f}% {_emoji(snap['gir_pct'])}", delta=_cnt_pair(snap["gir_made"], snap["gir_att"]))
+    c5.metric("FW% (P4/P5)", f"{snap['fw_pct']:.1f}% {_emoji(snap['fw_pct'])}", delta=_cnt_pair(snap["fw_made"], snap["fw_att"]))
+    c6.metric("Scr%", f"{snap['scr_pct']:.1f}%", delta=_cnt_pair(snap["scr_made"], snap["scr_ops"]))
+
+    st.markdown("### 🚀 Choose your next view")
+
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if st.button("📦 Slice Summary", use_container_width=True):
+            st.session_state["mode"] = "📦 Slice Summary (Any View)"
+            st.rerun()
+        if st.button("👥 Player Comparison", use_container_width=True):
+            st.session_state["mode"] = "👥 Player Comparison (same slice)"
+            st.rerun()
+
+    with b2:
+        if st.button("🏆 Leaderboard Dashboard", use_container_width=True):
+            st.session_state["mode"] = "🏆 Leaderboard Dashboard (multi-stat)"
+            st.rerun()
+        if st.button("📊 Visual Dashboard", use_container_width=True):
+            st.session_state["mode"] = "📊 Visual Dashboard (charts-only)"
+            st.rerun()
+
+    with b3:
+        if st.button("📈 Approach Analytics", use_container_width=True):
+            st.session_state["mode"] = "📈 Approach Analytics (Distance + Club + Heatmap)"
+            st.rerun()
+        if st.button("⛳ Putting Proximity", use_container_width=True):
+            st.session_state["mode"] = "⛳ Putting Proximity (Validation)"
+            st.rerun()
+
+    st.caption("Tip: Start with **Slice Summary** to validate your filters, then jump into leaderboards or approach insights.")
+
+
+if mode == "📦 Slice Summary (Any View)":
     st.caption(f"Rows in slice: {slice_for_summary.shape[0]:,}")
 
     summary = build_summary(slice_for_summary)
@@ -2490,6 +2552,168 @@ elif mode == "🏆 Leaderboard Dashboard (multi-stat)":
             with cB:
                 st.markdown("**Quick Chart — Putts/18**")
                 _compare_chart(dfc_all, "Putts/18")
+
+    
+    # ----------------------------------------------------------
+    # NEW: Score Breakdown Leaderboards (Counts + % of Holes)
+    # ----------------------------------------------------------
+    with st.expander("🏌️ Score Breakdown (Counts + % of holes)", expanded=True):
+
+        if "Score Label" not in dash_frame.columns:
+            st.warning("No 'Score Label' column found in this slice.")
+        else:
+            score_order = ["Albatross", "Eagle", "Birdie", "Par", "Bogey", "Double Bogey", "Triple Bogey +"]
+
+            rows_sb = []
+            for p in dfc_all["Player"].tolist():
+                b = dash_frame[dash_frame["Player Name"] == p].copy()
+                holes = int(len(b))
+                if holes <= 0:
+                    continue
+
+                vc = b["Score Label"].value_counts()
+
+                def _cnt(lbl):
+                    return int(vc.get(lbl, 0))
+
+                al = _cnt("Albatross")
+                ea = _cnt("Eagle")
+                bi = _cnt("Birdie")
+                pa = _cnt("Par")
+                bo = _cnt("Bogey")
+                db = _cnt("Double Bogey")
+                tp = _cnt("Triple Bogey +")
+
+                par_or_better = al + ea + bi + pa
+                dbl_plus = db + tp
+
+                r = {"Player": p, "Holes": holes}
+
+                for lbl, c in [
+                    ("Albatross", al),
+                    ("Eagle", ea),
+                    ("Birdie", bi),
+                    ("Par", pa),
+                    ("Bogey", bo),
+                    ("Double Bogey", db),
+                    ("Triple Bogey +", tp),
+                ]:
+                    r[lbl] = c
+                    r[f"{lbl}%"] = _pct(c, holes)
+
+                r["Par or Better"] = par_or_better
+                r["Par or Better%"] = _pct(par_or_better, holes)
+                r["Double Bogey+"] = dbl_plus
+                r["Double Bogey+%"] = _pct(dbl_plus, holes)
+
+                rows_sb.append(r)
+
+            df_sb = pd.DataFrame(rows_sb)
+
+            if df_sb.empty:
+                st.info("No score breakdown rows available.")
+            else:
+                keep_full = ["Player"] + sum(
+                    [[lbl, f"{lbl}%"] for lbl in score_order], []
+                ) + ["Par or Better", "Par or Better%", "Double Bogey+", "Double Bogey+%"]
+
+                keep_full = [c for c in keep_full if c in df_sb.columns]
+
+                render_mini_leaderboards(df_sb[keep_full].copy(), top_n=top_n, title="Score Breakdown")
+
+                # Table view (like other sections): Count + % in one cell
+                def _fmt_cp(c, holes):
+                    return f"{int(c)}/{int(holes)} ({_pct(c, holes):.1f}%)"
+
+                table_cols = ["Player","Holes"] + score_order + ["Par or Better","Double Bogey+"]
+                table_cols = [c for c in table_cols if c in df_sb.columns]
+                df_tbl = df_sb[table_cols].copy()
+
+                for lbl in score_order:
+                    if lbl in df_tbl.columns:
+                        df_tbl[lbl] = df_sb.apply(lambda r: _fmt_cp(r.get(lbl, 0), r["Holes"]), axis=1)
+
+                if "Par or Better" in df_tbl.columns:
+                    df_tbl["Par or Better"] = df_sb.apply(lambda r: _fmt_cp(r.get("Par or Better", 0), r["Holes"]), axis=1)
+
+                if "Double Bogey+" in df_tbl.columns:
+                    df_tbl["Double Bogey+"] = df_sb.apply(lambda r: _fmt_cp(r.get("Double Bogey+", 0), r["Holes"]), axis=1)
+
+                st.markdown("**Table — Counts + % of holes**")
+                st.dataframe(df_tbl, use_container_width=True, hide_index=True)
+
+                if show_charts:
+                    st.markdown("**Quick Chart — Categories (Par or Better / Bogey / Double+)**")
+                    cat_rows = []
+                    for _, r in df_sb.iterrows():
+                        holes = float(r["Holes"]) if r.get("Holes") else 0.0
+                        pob = float(r.get("Par or Better", 0))
+                        bog = float(r.get("Bogey", 0))
+                        dplus = float(r.get("Double Bogey+", 0))
+                        for cat, c in [("Par or Better", pob), ("Bogey", bog), ("Double Bogey+", dplus)]:
+                            cat_rows.append({
+                                "Player": r["Player"],
+                                "Category": cat,
+                                "Count": c,
+                                "Percent": _pct(c, holes) if holes else 0.0
+                            })
+                    df_cat = pd.DataFrame(cat_rows)
+
+                    if not df_cat.empty and df_cat["Count"].sum() > 0:
+                        cat_chart = (
+                            alt.Chart(df_cat)
+                            .mark_bar()
+                            .encode(
+                                y=alt.Y("Player:N", title=None),
+                                x=alt.X("Percent:Q", title="% of holes", stack="normalize"),
+                                color=alt.Color("Category:N", legend=alt.Legend(orient="bottom")),
+                                tooltip=[
+                                    "Player:N",
+                                    "Category:N",
+                                    alt.Tooltip("Count:Q", title="Count", format=",.0f"),
+                                    alt.Tooltip("Percent:Q", title="%", format=".1f"),
+                                ],
+                            )
+                            .properties(height=min(450, 40 * df_sb.shape[0] + 60))
+                        )
+                        st.altair_chart(cat_chart, use_container_width=True)
+                    else:
+                        st.caption("No category counts found for this slice.")
+
+                if show_charts:
+                    st.markdown("**Quick Chart — Score Mix by Player (% of holes)**")
+
+                    long_rows = []
+                    for _, r in df_sb.iterrows():
+                        for lbl in score_order:
+                            long_rows.append({
+                                "Player": r["Player"],
+                                "Category": lbl,
+                                "Count": r.get(lbl, 0),
+                                "Percent": r.get(f"{lbl}%", 0.0),
+                            })
+
+                    df_long = pd.DataFrame(long_rows)
+
+                    if df_long["Count"].sum() == 0:
+                        st.caption("No score label counts found.")
+                    else:
+                        chart = (
+                            alt.Chart(df_long)
+                            .mark_bar()
+                            .encode(
+                                y=alt.Y("Player:N", title=None),
+                                x=alt.X("Percent:Q", title="% of holes", stack="normalize"),
+                                color=alt.Color("Category:N", legend=alt.Legend(orient="bottom")),
+                                tooltip=[
+                                    "Player:N",
+                                    "Category:N",
+                                    alt.Tooltip("Count:Q", title="Count"),
+                                    alt.Tooltip("Percent:Q", title="%", format=".1f"),
+                                ],
+                            )
+                        )
+                        st.altair_chart(chart, use_container_width=True)
 
     with st.expander("🎯 Ball Striking (GIR + FW + GIR|FW)", expanded=True):
         keep = [c for c in ["Player","GIR","GIR%","GIR P3","GIR P3%","GIR P4","GIR P4%","GIR P5","GIR P5%","FW","FW%","GIR|FW","GIR|FW%"] if c in dfc_all.columns]
@@ -3581,3 +3805,101 @@ elif mode == "⛳ Putting Proximity (Validation)":
 
 else:
     st.warning("Unknown mode selection.")
+
+
+# ==========================================================
+# NEW: Club vs GIR Overlay (Inside Approach Analytics)
+# ==========================================================
+
+st.markdown("## 🎯 Club vs GIR — Overlay View")
+
+if CLUB_COL in df.columns and "GIR" in df.columns:
+
+    players_available = sorted(df["Player Name"].dropna().unique())
+
+    col1, col2 = st.columns(2)
+    with col1:
+        primary_player = st.selectbox("Primary Player", players_available, key="club_primary")
+    with col2:
+        compare_player = st.selectbox("Compare Player (Optional)", [""] + players_available, key="club_compare")
+
+    min_attempts = st.slider("Minimum Attempts per Club", 1, 20, 3, key="club_min_attempts")
+
+    
+    def _gir_flag(series: pd.Series) -> pd.Series:
+        """Return 1/0 for GIR across common encodings: Yes/No, Y/N, True/False, 1/0."""
+        s = series.copy()
+        # Numeric already?
+        num = pd.to_numeric(s, errors="coerce")
+        if num.notna().any():
+            # Treat any positive as 1, zero/negative as 0 (common imports are 1/0)
+            return (num.fillna(0) > 0).astype(int)
+        # Strings / bool-like
+        st_s = s.astype(str).str.strip().str.lower()
+        yes = {"yes","y","true","t","1","gir","hit","made"}
+        no  = {"no","n","false","f","0","miss","na","nan",""}
+        out = st_s.map(lambda v: 1 if v in yes else (0 if v in no else 0))
+        return out.fillna(0).astype(int)
+
+    def compute_club_gir(data, player):
+        d = data[data["Player Name"] == player].copy()
+        d = d[d[CLUB_COL].notna() & (d[CLUB_COL].astype(str).str.strip() != "")]
+        # GIR flag + attempts
+        d["GIR_flag"] = _gir_flag(d["GIR"])
+        grp = (
+            d.groupby(CLUB_COL, dropna=False)
+            .agg(
+                attempts=("GIR_flag", "size"),
+                gir_made=("GIR_flag", "sum"),
+            )
+            .reset_index()
+        )
+        grp = grp[grp["attempts"] >= min_attempts]
+        grp["GIR_pct"] = grp.apply(lambda r: _pct(r["gir_made"], r["attempts"]), axis=1)
+        grp["Player"] = player
+        return grp
+
+    base_df = df.copy()
+
+    # Debug (helps when chart shows no points)
+    with st.expander("🔎 Debug: Club vs GIR data", expanded=False):
+        st.write("Total rows in current dataset:", len(base_df))
+        st.write("Rows for primary player:", int((base_df["Player Name"] == primary_player).sum()))
+        st.write("Unique GIR values (sample):", base_df["GIR"].dropna().astype(str).str.strip().str.lower().value_counts().head(12))
+        st.write("Unique clubs (sample):", base_df[CLUB_COL].dropna().astype(str).str.strip().value_counts().head(20))
+
+
+    p1_df = compute_club_gir(base_df, primary_player)
+
+    if compare_player:
+        p2_df = compute_club_gir(base_df, compare_player)
+        chart_df = pd.concat([p1_df, p2_df])
+    else:
+        chart_df = p1_df
+
+    if not chart_df.empty:
+        chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(f"{CLUB_COL}:N", sort=None, title="Club"),
+                y=alt.Y("GIR_pct:Q", title="GIR %"),
+                color="Player:N",
+                tooltip=[
+                    "Player",
+                    alt.Tooltip(CLUB_COL, title="Club"),
+                    alt.Tooltip("attempts", title="Attempts"),
+                    alt.Tooltip("gir_made", title="GIR Made"),
+                    alt.Tooltip("GIR_pct", title="GIR %", format=".1f")
+                ]
+            )
+            .properties(height=400)
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+    else:
+        st.info("Not enough data for selected player(s) with current minimum attempts filter.")
+
+else:
+    st.warning("Required columns missing for Club vs GIR view.")
