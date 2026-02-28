@@ -2931,20 +2931,36 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
         top_clubs = st.slider("Top Clubs (bar)", 6, 30, 18)
 
     with a5:
-        compare_player = st.selectbox(
-            "Overlay Player (optional)",
-            options=["— None —"] + a_players,
-            index=0,
-            help="Overlay another player on the distance + club charts (same slice filters).",
-        )
+        # Overlay up to 4 additional players on the charts (kept separate from the primary selection)
+        try:
+            overlay_players = st.multiselect(
+                "Overlay Players (optional — up to 4)",
+                options=a_players,
+                default=[],
+                max_selections=4,
+                help="Overlay up to 4 additional players on the distance + club charts (same slice filters).",
+            )
+        except TypeError:
+            # Older Streamlit: no max_selections
+            overlay_players = st.multiselect(
+                "Overlay Players (optional — up to 4)",
+                options=a_players,
+                default=[],
+                help="Overlay up to 4 additional players on the distance + club charts (same slice filters).",
+            )
+            overlay_players = overlay_players[:4]
 
     a_frame = base_f.copy()
     if sel_a_players:
         a_frame = a_frame[a_frame["Player Name"].isin(sel_a_players)].copy()
 
-    cmp_frame = pd.DataFrame()
-    if compare_player and compare_player != "— None —":
-        cmp_frame = base_f[base_f["Player Name"] == compare_player].copy()
+    cmp_frames = {}
+    if 'overlay_players' in locals() and overlay_players:
+        for _p in overlay_players:
+            try:
+                cmp_frames[_p] = base_f[base_f["Player Name"] == _p].copy()
+            except Exception:
+                continue
 
     if a_frame.empty:
         st.warning("No rows match the analytics selection.")
@@ -2988,42 +3004,68 @@ elif mode == "📈 Approach Analytics (Distance + Club + Heatmap)":
     # A) Distance buckets
     st.markdown("<div class='section-h'>A) GIR by Distance Bucket</div>", unsafe_allow_html=True)
     dist_g = build_gir_by_distance(a_frame, min_attempts=min_attempts)
-    if cmp_frame is not None and not cmp_frame.empty:
-        dist_g2 = build_gir_by_distance(cmp_frame, min_attempts=min_attempts)
-        if not dist_g2.empty:
-            dist_g2 = dist_g2.copy()
-            dist_g2["Group"] = str(compare_player)
-        if not dist_g.empty:
-            dist_g = dist_g.copy()
-            dist_g["Group"] = "Primary"
-        dist_g = pd.concat([d for d in [dist_g, dist_g2] if d is not None and not d.empty], ignore_index=True)
-    _line_chart_distance_gir(dist_g)
+
+    parts = []
+    if dist_g is not None and not dist_g.empty:
+        d0 = dist_g.copy()
+        d0["Group"] = "Primary"
+        parts.append(d0)
+
+    if isinstance(locals().get("cmp_frames", None), dict) and cmp_frames:
+        for _p, _dfp in cmp_frames.items():
+            if _dfp is None or _dfp.empty:
+                continue
+            _d = build_gir_by_distance(_dfp, min_attempts=min_attempts)
+            if _d is None or _d.empty:
+                continue
+            _d = _d.copy()
+            _d["Group"] = str(_p)
+            parts.append(_d)
+
+    dist_plot = pd.concat(parts, ignore_index=True) if parts else dist_g
+    _line_chart_distance_gir(dist_plot)
 
     # B) Clubs
     st.markdown("<div class='section-h'>B) GIR by Club</div>", unsafe_allow_html=True)
     club_g = build_gir_by_club(a_frame, min_attempts=min_attempts)
-    if cmp_frame is not None and not cmp_frame.empty:
-        club_g2 = build_gir_by_club(cmp_frame, min_attempts=min_attempts)
-        if not club_g2.empty:
-            club_g2 = club_g2.copy()
-            club_g2["Group"] = str(compare_player)
-        if not club_g.empty:
-            club_g = club_g.copy()
-            club_g["Group"] = "Primary"
-        club_g = pd.concat([d for d in [club_g, club_g2] if d is not None and not d.empty], ignore_index=True)
-    _bar_chart_club_gir(club_g, top_n=top_clubs)
+
+    parts = []
+    if club_g is not None and not club_g.empty:
+        c0 = club_g.copy()
+        c0["Group"] = "Primary"
+        parts.append(c0)
+
+    if isinstance(locals().get("cmp_frames", None), dict) and cmp_frames:
+        for _p, _dfp in cmp_frames.items():
+            if _dfp is None or _dfp.empty:
+                continue
+            _c = build_gir_by_club(_dfp, min_attempts=min_attempts)
+            if _c is None or _c.empty:
+                continue
+            _c = _c.copy()
+            _c["Group"] = str(_p)
+            parts.append(_c)
+
+    club_plot = pd.concat(parts, ignore_index=True) if parts else club_g
+    _bar_chart_club_gir(club_plot, top_n=top_clubs)
 
     # Best of both worlds (heatmap)
     st.markdown("<div class='section-h'>Best of both worlds) Distance × Club Heatmap (GIR%)</div>", unsafe_allow_html=True)
     heat = build_gir_heatmap_distance_x_club(a_frame, min_cell_attempts=min_cell)
-    if cmp_frame is not None and not cmp_frame.empty:
-        heat2 = build_gir_heatmap_distance_x_club(cmp_frame, min_cell_attempts=min_cell)
+
+    # Heatmap overlay: show primary + the *first* overlay player (keeps layout readable)
+    _overlay_for_heat = None
+    if isinstance(locals().get("cmp_frames", None), dict) and cmp_frames:
+        _overlay_for_heat = list(cmp_frames.keys())[0] if len(cmp_frames.keys()) > 0 else None
+
+    if _overlay_for_heat:
+        heat2 = build_gir_heatmap_distance_x_club(cmp_frames.get(_overlay_for_heat, pd.DataFrame()), min_cell_attempts=min_cell)
         hL, hR = st.columns(2)
         with hL:
             st.markdown("**Primary**")
             _heatmap_distance_x_club(heat)
         with hR:
-            st.markdown(f"**Overlay: {compare_player}**")
+            st.markdown(f"**Overlay: {_overlay_for_heat}**")
             _heatmap_distance_x_club(heat2)
         # Keep primary heat in variable for exports/expanders below
     else:
