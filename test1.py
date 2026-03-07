@@ -957,6 +957,162 @@ def render_distance_club_heatmap(frame, title="Distance vs Club Heatmap"):
     pivot = heat.pivot(index="Bucket", columns="Club", values="CellLabel").reset_index()
     st.dataframe(pivot, use_container_width=True, hide_index=True)
 
+
+
+def build_distance_performance_curve(frame):
+    d = prepare_approach_frame(frame).copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "AvgProx", "ToParPerHole", "Label"])
+
+    # Score-to-par by hole for approach shots
+    if "Hole Score" in d.columns and "Par" in d.columns:
+        d["ScoreToParHole"] = pd.to_numeric(d["Hole Score"], errors="coerce").fillna(0) - pd.to_numeric(d["Par"], errors="coerce").fillna(0)
+    else:
+        d["ScoreToParHole"] = 0.0
+
+    out = (
+        d.dropna(subset=["Approach Bucket"])
+         .groupby("Approach Bucket", as_index=False)
+         .agg(
+             Attempts=("Approach GIR Flag", "size"),
+             Made=("Approach GIR Flag", "sum"),
+             AvgProx=("Approach Proximity", "mean"),
+             ToParPerHole=("ScoreToParHole", "mean"),
+         )
+         .rename(columns={"Approach Bucket": "Bucket"})
+    )
+    out["Pct"] = (out["Made"] / out["Attempts"] * 100).round(1)
+    out["Label"] = out.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {r['Pct']:.1f}%", axis=1)
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)
+
+def render_distance_performance_curve(round_curve, bench_curve=None, compare_label="Baseline"):
+    if round_curve is None or round_curve.empty:
+        st.info("No distance performance curve data available for this round.")
+        return
+
+    curve = round_curve.copy()
+    curve["Series"] = "Round"
+
+    layers = []
+
+    line = (
+        alt.Chart(curve)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Distance Bucket"),
+            y=alt.Y("Pct:Q", title="GIR %"),
+            tooltip=[
+                alt.Tooltip("Bucket:N"),
+                alt.Tooltip("Attempts:Q"),
+                alt.Tooltip("Made:Q"),
+                alt.Tooltip("Pct:Q", format=".1f"),
+                alt.Tooltip("AvgProx:Q", title="Avg Prox", format=".1f"),
+                alt.Tooltip("ToParPerHole:Q", title="To Par / Hole", format=".2f"),
+            ],
+        )
+        .properties(height=320)
+    )
+    layers.append(line)
+
+    curve["CurveLabel"] = curve.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
+
+    labels = (
+        alt.Chart(curve)
+        .mark_text(dy=-12, fontWeight="bold")
+        .encode(
+            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER),
+            y=alt.Y("Pct:Q"),
+            text="CurveLabel:N",
+        )
+    )
+    layers.append(labels)
+
+    if bench_curve is not None and not bench_curve.empty:
+        base = bench_curve.copy()
+        base["Series"] = compare_label
+        base_line = (
+            alt.Chart(base)
+            .mark_line(point=True, strokeDash=[6,4])
+            .encode(
+                x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER),
+                y=alt.Y("Pct:Q"),
+                tooltip=[
+                    alt.Tooltip("Bucket:N"),
+                    alt.Tooltip("Attempts:Q"),
+                    alt.Tooltip("Made:Q"),
+                    alt.Tooltip("Pct:Q", title=f"{compare_label} GIR %", format=".1f"),
+                ],
+            )
+        )
+        layers.insert(0, base_line)
+
+    chart = layers[0]
+    for lyr in layers[1:]:
+        chart = chart + lyr
+
+    st.altair_chart(chart, use_container_width=True)
+
+def render_dispersion_panel(frame, title="Approach Dispersion"):
+    d = prepare_approach_frame(frame).copy()
+    if d.empty:
+        st.info("No approach dispersion data available.")
+        return
+
+    vectors = {
+        "Short Left": (-0.7, -0.7),
+        "Left": (-1.0, 0.0),
+        "Long Left": (-0.7, 0.7),
+        "Short": (0.0, -1.0),
+        "Long": (0.0, 1.0),
+        "Short Right": (0.7, -0.7),
+        "Right": (1.0, 0.0),
+        "Long Right": (0.7, 0.7),
+    }
+
+    def _xy(row):
+        prox = float(row.get("Approach Proximity", 0) or 0)
+        if prox <= 0:
+            prox = 5.0
+        direction = row.get("Approach Miss Direction Clean", "")
+        if direction in vectors:
+            vx, vy = vectors[direction]
+            return pd.Series({"x": vx * prox, "y": vy * prox})
+        # center GIR / no-direction shots
+        return pd.Series({"x": 0.0, "y": 0.0})
+
+    pts = d.join(d.apply(_xy, axis=1))
+    pts["Hole"] = _int(_safe_col(pts, "Hole", 0))
+
+    zero_h = alt.Chart(pd.DataFrame({"y":[0]})).mark_rule(opacity=0.25).encode(y="y:Q")
+    zero_v = alt.Chart(pd.DataFrame({"x":[0]})).mark_rule(opacity=0.25).encode(x="x:Q")
+
+    scatter = (
+        alt.Chart(pts)
+        .mark_circle(size=110, opacity=0.8)
+        .encode(
+            x=alt.X("x:Q", title="Left / Right (ft)"),
+            y=alt.Y("y:Q", title="Short / Long (ft)"),
+            color=alt.Color("Approach GIR Flag:N", title="Approach GIR", scale=alt.Scale(domain=[0,1], range=["#ee6c4d", "#64dfb5"])),
+            tooltip=[
+                alt.Tooltip("Hole:Q"),
+                alt.Tooltip("Approach Club:N", title="Club"),
+                alt.Tooltip("Approach Bucket:N", title="Bucket"),
+                alt.Tooltip("Approach Miss Direction Clean:N", title="Direction"),
+                alt.Tooltip("Approach Proximity:Q", title="Proximity", format=".1f"),
+                alt.Tooltip("Approach GIR Flag:N", title="GIR"),
+            ],
+        )
+        .properties(height=360, title=title)
+    )
+
+    hole_df = pd.DataFrame({"x":[0.0], "y":[0.0], "Label":["Hole"]})
+    hole = alt.Chart(hole_df).mark_point(shape="diamond", size=220, filled=True).encode(
+        x="x:Q", y="y:Q", tooltip=[alt.Tooltip("Label:N")]
+    )
+
+    st.altair_chart((zero_h + zero_v + scatter + hole).configure_view(stroke=None), use_container_width=True)
+
 # =========================================================
 # Load + base prep
 # =========================================================
@@ -1871,6 +2027,27 @@ with tab_approach:
     else:
         st.info("No usable distance bucket data found for this round / comparison group.")
 
+    st.markdown("#### Distance Performance Curve")
+    round_curve = build_distance_performance_curve(round_data)
+    bench_curve = build_distance_performance_curve(benchmark_df)
+    render_distance_performance_curve(round_curve, bench_curve, compare_label=compare_mode)
+
+    if not round_curve.empty:
+        st.dataframe(
+            round_curve.rename(columns={
+                "Attempts": "Round Attempts",
+                "Made": "Round Made",
+                "Pct": "Round GIR %",
+                "AvgProx": "Round Avg Prox",
+                "ToParPerHole": "Round To Par / Hole",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### Approach Dispersion Plot")
+    render_dispersion_panel(round_data, title="Round Approach Dispersion")
+
     st.markdown("#### Approach GIR by Club")
     min_club_attempts = st.slider("Minimum attempts for club chart (applies to round and comparison display)", 1, 10, 1, 1)
     round_club = summarize_approach_by_club(round_data, min_attempts=1)
@@ -1954,9 +2131,6 @@ with tab_approach:
 
     st.markdown("#### Approach Miss Heat Map")
     render_direction_heatmap(round_dir)
-
-    st.markdown("#### Approach Dispersion Plot")
-    render_dispersion_plot(round_data, title="Round Approach Dispersion")
 
     st.markdown("#### Distance Performance Ranking")
     rank_df = build_distance_rank_table(round_dist, bench_dist)
