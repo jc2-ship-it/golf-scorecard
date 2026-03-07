@@ -851,6 +851,112 @@ def build_sg_style_insights(full_df, round_data, compare_mode="All Time"):
         "short_game_extra": short_extra,
     }
 
+
+
+def build_sg_round_impact(round_data, sg_beta):
+    actual_score = float(pd.to_numeric(_safe_col(round_data, "Hole Score", 0), errors="coerce").sum())
+    expected_score = actual_score - float(sg_beta.get("total_sg", 0.0))
+    performance_delta = actual_score - expected_score  # negative means better than expected
+    return {
+        "actual_score": actual_score,
+        "expected_score": expected_score,
+        "sg_vs_baseline": float(sg_beta.get("total_sg", 0.0)),
+        "performance_delta": performance_delta,
+    }
+
+def build_club_rank_table(round_club, bench_club):
+    if round_club.empty:
+        return pd.DataFrame(columns=["Club", "Round Attempts", "Round GIR %", "Round Avg Prox", "Baseline GIR %", "Delta"])
+    out = round_club[["Club", "Attempts", "Pct", "AvgProx"]].rename(
+        columns={"Attempts": "Round Attempts", "Pct": "Round GIR %", "AvgProx": "Round Avg Prox"}
+    ).copy()
+    if not bench_club.empty:
+        out = out.merge(
+            bench_club[["Club", "Pct", "AvgProx"]].rename(columns={"Pct": "Baseline GIR %", "AvgProx": "Baseline Avg Prox"}),
+            on="Club",
+            how="left"
+        )
+        out["Delta"] = (out["Round GIR %"] - out["Baseline GIR %"]).round(1)
+    else:
+        out["Baseline GIR %"] = pd.NA
+        out["Baseline Avg Prox"] = pd.NA
+        out["Delta"] = pd.NA
+    return out.sort_values(["Round GIR %", "Round Attempts"], ascending=[False, False]).reset_index(drop=True)
+
+
+
+def build_distance_club_heatmap(frame):
+    d = prepare_approach_frame(frame).copy()
+    d = d[(d["Approach Bucket"].notna()) & (d["Approach Club"].astype(str).str.strip() != "")]
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Club", "Attempts", "Made", "Pct", "CellLabel", "PctLabel"])
+
+    out = (
+        d.groupby(["Approach Bucket", "Approach Club"], as_index=False)
+         .agg(
+             Attempts=("Approach GIR Flag", "size"),
+             Made=("Approach GIR Flag", "sum"),
+             AvgProx=("Approach Proximity", "mean")
+         )
+         .rename(columns={"Approach Bucket": "Bucket", "Approach Club": "Club"})
+    )
+    out["Pct"] = (out["Made"] / out["Attempts"] * 100).round(1)
+
+    def _emoji(p):
+        if p >= 50:
+            return "🔥"
+        elif p >= 35:
+            return "🟢"
+        elif p >= 20:
+            return "🟡"
+        else:
+            return "🧊"
+
+    out["CellLabel"] = out.apply(lambda r: f"{_emoji(r['Pct'])} {r['Pct']:.0f}%", axis=1)
+    out["PctLabel"] = out["Pct"].map(lambda x: f"{x:.1f}%")
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
+    return out.sort_values(["Bucket", "Club"]).reset_index(drop=True)
+
+def render_distance_club_heatmap(frame, title="Distance vs Club Heatmap"):
+    heat = build_distance_club_heatmap(frame)
+    if heat.empty:
+        st.info("No approach distance/club rows available for heatmap.")
+        return
+
+    club_order = (
+        heat.groupby("Club", as_index=False)["Attempts"]
+        .sum()
+        .sort_values(["Attempts", "Club"], ascending=[False, True])["Club"]
+        .tolist()
+    )
+
+    base = alt.Chart(heat).encode(
+        x=alt.X("Club:N", sort=club_order, title="Club"),
+        y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Distance Bucket"),
+        tooltip=[
+            alt.Tooltip("Bucket:N"),
+            alt.Tooltip("Club:N"),
+            alt.Tooltip("Attempts:Q"),
+            alt.Tooltip("Made:Q"),
+            alt.Tooltip("Pct:Q", format=".1f"),
+            alt.Tooltip("AvgProx:Q", title="Avg Prox", format=".1f"),
+        ]
+    )
+
+    rect = base.mark_rect(stroke="#666", cornerRadius=8).encode(
+        color=alt.Color("Pct:Q", title="GIR %")
+    )
+
+    text = base.mark_text(fontWeight="bold").encode(
+        text="CellLabel:N",
+        color=alt.condition("datum.Pct >= 45", alt.value("black"), alt.value("white"))
+    )
+
+    st.altair_chart((rect + text).properties(height=max(320, len(APPROACH_BUCKET_ORDER)*26), title=title), use_container_width=True)
+
+    pivot = heat.pivot(index="Bucket", columns="Club", values="CellLabel").reset_index()
+    st.dataframe(pivot, use_container_width=True, hide_index=True)
+
 # =========================================================
 # Load + base prep
 # =========================================================
@@ -1405,6 +1511,22 @@ with tab_scorecard:
         unsafe_allow_html=True,
     )
 
+    sg_impact = build_sg_round_impact(round_data, sg_beta)
+    impact_color = "#64dfb5" if sg_impact["performance_delta"] < 0 else "#ee6c4d"
+    impact_phrase = f"{abs(sg_impact['performance_delta']):.1f} strokes {'better' if sg_impact['performance_delta'] < 0 else 'worse'} than expected"
+    st.markdown(
+        f"""
+        <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
+          <b>🎯 Round Impact vs Baseline</b><br>
+          SG vs Baseline: <span style="font-weight:800;">{sg_impact['sg_vs_baseline']:+.2f}</span><br>
+          Expected Score: {sg_impact['expected_score']:.1f}<br>
+          Actual Score: {sg_impact['actual_score']:.0f}<br>
+          Performance: <span style="font-weight:800; color:{impact_color};">{impact_phrase}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     comparisons_html = f"""
     <div style="margin-top:6px; padding:10px; background:#262626; border-radius:10px; line-height:1.5;">
       <b>📊 Benchmarks (Recent)</b><br>
@@ -1793,6 +1915,10 @@ with tab_approach:
             how="outer"
         )
         st.dataframe(club_table.sort_values(["Round Attempts", f"{compare_mode} Attempts"], ascending=False), use_container_width=True, hide_index=True)
+
+        st.markdown("#### Club Performance Ranking")
+        club_rank = build_club_rank_table(round_club, bench_club)
+        st.dataframe(club_rank, use_container_width=True, hide_index=True)
     else:
         st.info("No usable approach club data found for this round / comparison group.")
 
@@ -1838,6 +1964,9 @@ with tab_approach:
         st.dataframe(rank_df, use_container_width=True, hide_index=True)
     else:
         st.info("No distance ranking rows available.")
+
+    st.markdown("#### Distance vs Club Heatmap")
+    render_distance_club_heatmap(round_data, title="Round Distance vs Club Heatmap")
 
     st.markdown("#### Shot Pattern Dashboard")
     shot_base = build_shot_pattern_frame(df, player)
