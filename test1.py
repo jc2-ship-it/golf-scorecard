@@ -4,7 +4,18 @@ import streamlit as st
 import datetime
 import altair as alt
 import os, json, random
+import re
 from pathlib import Path
+
+
+def _safe_int_scalar(val, default=0):
+    x = pd.to_numeric(val, errors="coerce")
+    return default if pd.isna(x) else int(x)
+
+def _safe_float_scalar(val, default=0.0):
+    x = pd.to_numeric(val, errors="coerce")
+    return default if pd.isna(x) else float(x)
+
 
 # =========================================================
 # Page
@@ -140,28 +151,74 @@ def _normalize_club(val):
     s = str(val).strip()
     if not s:
         return ""
-    mapping = {
-        "P WEDGE": "PW",
+
+    key = s.upper().replace("IRON", "I").replace(" ", "").replace("-", "")
+    key = key.replace("DEG", "").replace("°", "")
+
+    named = {
         "PWEDGE": "PW",
-        "PITCHING WEDGE": "PW",
-        "A WEDGE": "AW",
-        "APPROACH WEDGE": "AW",
-        "G WEDGE": "GW",
-        "GAP WEDGE": "GW",
-        "S WEDGE": "SW",
-        "SAND WEDGE": "SW",
-        "L WEDGE": "LW",
-        "LOB WEDGE": "LW",
-        "9I": "9 Iron",
-        "8I": "8 Iron",
-        "7I": "7 Iron",
-        "6I": "6 Iron",
-        "5I": "5 Iron",
-        "4I": "4 Iron",
-        "3I": "3 Iron",
+        "PW": "PW",
+        "PITCHINGWEDGE": "PW",
+        "AWEDGE": "AW",
+        "AW": "AW",
+        "APPROACHWEDGE": "AW",
+        "GWEDGE": "GW",
+        "GW": "GW",
+        "GAPWEDGE": "GW",
+        "SWEDGE": "SW",
+        "SW": "SW",
+        "SANDWEDGE": "SW",
+        "LWEDGE": "LW",
+        "LW": "LW",
+        "LOBWEDGE": "LW",
+        "DRIVER": "DRIVER",
+        "DR": "DRIVER",
+        "1W": "DRIVER",
+        "3W": "3W",
+        "4W": "4W",
+        "5W": "5W",
+        "7W": "7W",
+        "2H": "2H",
+        "3H": "3H",
+        "4H": "4H",
+        "5H": "5H",
+        "6H": "6H",
+        "7H": "7H",
+        "HY": "HY",
+        "HYBRID": "HY",
     }
-    key = s.upper()
-    return mapping.get(key, s)
+    if key in named:
+        return named[key]
+
+    # Loft wedges
+    if key.isdigit():
+        loft = int(key)
+        if loft >= 58:
+            return "LW"
+        if loft >= 54:
+            return "SW"
+        if loft >= 50:
+            return "GW"
+        if loft >= 45:
+            return "PW"
+        # Plain single-digit numbers are usually irons
+        if 1 <= loft <= 9:
+            return f"{loft}I"
+
+    # Iron-style labels: 9I, 8, etc.
+    m_iron = re.fullmatch(r"([1-9])I?", key)
+    if m_iron:
+        return f"{m_iron.group(1)}I"
+
+    # Hybrid / wood labels
+    m_hybrid = re.fullmatch(r"([2-7])H", key)
+    if m_hybrid:
+        return f"{m_hybrid.group(1)}H"
+    m_wood = re.fullmatch(r"([2-9])W", key)
+    if m_wood:
+        return f"{m_wood.group(1)}W"
+
+    return key
 
 def _normalize_direction(val):
     if pd.isna(val):
@@ -345,12 +402,28 @@ def summarize_approach_miss_direction(frame):
 # =========================================================
 def prepare_putting_frame(frame):
     d = frame.copy()
-    d["First Putt Distance"] = _num(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", 0))
-    d["Putt Made Feet"] = _num(_safe_col(d, "Feet of Putt Made (How far was the putt you made)", 0))
+
+    # Match the working Putting_Stats validation logic:
+    # - remove hole-outs entirely (Putts == 0)
+    # - exclude blank first-putt proximity rows
+    # - bucket by first-putt proximity
+    # - "Made" for this view = 1-putt from that starting distance
+    d["First Putt Distance"] = pd.to_numeric(
+        _safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", pd.NA),
+        errors="coerce"
+    )
+    d["Putt Made Feet"] = pd.to_numeric(
+        _safe_col(d, "Feet of Putt Made (How far was the putt you made)", pd.NA),
+        errors="coerce"
+    )
     d["Putts Clean"] = _int(_safe_col(d, "Putts", 0))
+
+    d = d[(d["Putts Clean"] > 0) & (d["First Putt Distance"].notna())].copy()
+
     d["Putt Bucket"] = d["First Putt Distance"].apply(lambda x: _bucket_value(x, PUTT_BUCKETS))
-    d["Putt Attempt"] = (d["First Putt Distance"] > 0).astype(int)
-    d["Putt Made Flag"] = (d["Putt Made Feet"] > 0).astype(int)
+    d["Putt Attempt"] = d["Putt Bucket"].notna().astype(int)
+    d["Putt Made Flag"] = (d["Putts Clean"] == 1).astype(int)
+
     d = d[d["Putt Attempt"] == 1].copy()
     return d
 
@@ -420,13 +493,21 @@ def render_bucket_compare_tab(round_summary, bench_summary, key_col, key_order, 
 
     long_df[key_col] = pd.Categorical(long_df[key_col], categories=key_order, ordered=True)
     long_df = long_df.sort_values([key_col, "Series"]).copy()
+    long_df["DisplayLabel"] = long_df.apply(
+        lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%",
+        axis=1
+    )
+
+    max_pct = float(long_df["Pct"].max()) if "Pct" in long_df and not long_df.empty else 100.0
+    label_pad = 22.0
+    x_max = max(100.0, max_pct + label_pad)
 
     chart = (
         alt.Chart(long_df)
         .mark_bar()
         .encode(
             y=alt.Y(f"{key_col}:N", sort=key_order, title=title),
-            x=alt.X("Pct:Q", title=x_title),
+            x=alt.X("Pct:Q", title=x_title, scale=alt.Scale(domain=[0, x_max])),
             color=alt.Color("Series:N", title="Series"),
             xOffset="Series:N",
             tooltip=[
@@ -441,18 +522,17 @@ def render_bucket_compare_tab(round_summary, bench_summary, key_col, key_order, 
         .properties(height=max(320, len(key_order) * 28))
     )
 
-    round_labels = long_df[long_df["Series"] == "Round"].copy()
     label_chart = (
-        alt.Chart(round_labels)
-        .mark_text(align="left", dx=6)
+        alt.Chart(long_df)
+        .mark_text(align="left", dx=6, fontWeight="bold", clip=False)
         .encode(
             y=alt.Y(f"{key_col}:N", sort=key_order),
-            x=alt.X("Pct:Q"),
-            text="Label:N",
+            x=alt.X("Pct:Q", scale=alt.Scale(domain=[0, x_max])),
+            text="DisplayLabel:N",
         )
     )
 
-    st.altair_chart(chart + label_chart, use_container_width=True)
+    st.altair_chart((chart + label_chart).configure_view(clip=False), use_container_width=True)
 
     table = pd.merge(
         round_summary.rename(columns={
@@ -476,6 +556,373 @@ def render_debug_section(title, debug_df):
             st.info("No rows to validate.")
         else:
             st.dataframe(debug_df, use_container_width=True, hide_index=True)
+
+
+def render_paired_compare_bars(compare_df, key_col, key_order, compare_mode, title, x_title="GIR %"):
+    """
+    Reliable visible labels:
+    - one row for Round
+    - one row for selected baseline
+    - explicit value shown at right, e.g. 3/5 60%
+    - round label gets green/red tint vs baseline
+    """
+    if compare_df.empty:
+        st.info(f"No usable {title.lower()} data found for this round / comparison group.")
+        return
+
+    plot_df = compare_df.copy()
+    plot_df[key_col] = plot_df[key_col].astype(str)
+    plot_df["DisplayLabel"] = plot_df.apply(
+        lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%",
+        axis=1
+    )
+
+    present = set(plot_df[key_col].tolist())
+    ordered_categories = [str(k) for k in key_order if str(k) in present]
+
+    if not ordered_categories:
+        st.info(f"No usable {title.lower()} data found for this round / comparison group.")
+        return
+
+    html = """
+    <style>
+      .pair-wrap {background:#222; padding:12px; border-radius:12px; margin-bottom:10px;}
+      .pair-cat {margin:10px 0 14px 0; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,.08);}
+      .pair-cat:last-child {border-bottom:none; margin-bottom:0; padding-bottom:0;}
+      .pair-cat-title {font-weight:700; margin-bottom:6px; color:#fff;}
+      .pair-row {
+        display:grid;
+        grid-template-columns: 90px minmax(140px, 1fr) 120px 58px;
+        gap:10px;
+        align-items:center;
+        margin:4px 0;
+      }
+      .pair-series {font-size:12px; color:#ddd; font-weight:700;}
+      .pair-bar-bg {
+        width:100%;
+        background:#3a3a3a;
+        border-radius:999px;
+        height:18px;
+        overflow:hidden;
+        position:relative;
+      }
+      .pair-bar-fill-round {
+        height:18px;
+        border-radius:999px;
+        background:#4f8cff;
+      }
+      .pair-bar-fill-base {
+        height:18px;
+        border-radius:999px;
+        background:#8a8a8a;
+      }
+      .pair-value {
+        font-size:12px;
+        color:#fff;
+        font-variant-numeric: tabular-nums;
+        text-align:left;
+        white-space:nowrap;
+        font-weight:700;
+      }
+      .pair-delta {
+        font-size:11px;
+        font-weight:700;
+        text-align:right;
+        white-space:nowrap;
+      }
+      .pair-good {color:#64dfb5;}
+      .pair-bad {color:#ee6c4d;}
+      .pair-neutral {color:#aaa;}
+    </style>
+    <div class="pair-wrap">
+    """
+
+    for cat in ordered_categories:
+        html += f'<div class="pair-cat"><div class="pair-cat-title">{cat}</div>'
+        cat_df = plot_df[plot_df[key_col] == cat].copy()
+
+        round_row = cat_df[cat_df["Series"] == "Round"]
+        base_row = cat_df[cat_df["Series"] == compare_mode]
+
+        round_pct = float(round_row["Pct"].iloc[0]) if not round_row.empty else 0.0
+        base_pct = float(base_row["Pct"].iloc[0]) if not base_row.empty else 0.0
+        delta = round_pct - base_pct
+
+        for series in ["Round", compare_mode]:
+            row = cat_df[cat_df["Series"] == series]
+            if row.empty:
+                pct = 0.0
+                label = "0/0 0%"
+            else:
+                pct = float(row["Pct"].iloc[0])
+                label = str(row["DisplayLabel"].iloc[0])
+
+            fill_class = "pair-bar-fill-round" if series == "Round" else "pair-bar-fill-base"
+
+            if series == "Round":
+                if delta > 0.05:
+                    delta_cls = "pair-good"
+                    delta_txt = f"+{delta:.0f}%"
+                elif delta < -0.05:
+                    delta_cls = "pair-bad"
+                    delta_txt = f"{delta:.0f}%"
+                else:
+                    delta_cls = "pair-neutral"
+                    delta_txt = "0%"
+            else:
+                delta_cls = "pair-neutral"
+                delta_txt = ""
+
+            html += f"""
+            <div class="pair-row">
+              <div class="pair-series">{series}</div>
+              <div class="pair-bar-bg">
+                <div class="{fill_class}" style="width:{max(0, min(100, pct))}%;"></div>
+              </div>
+              <div class="pair-value">{label}</div>
+              <div class="pair-delta {delta_cls}">{delta_txt}</div>
+            </div>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
+
+    import streamlit.components.v1 as components
+    height_px = max(220, 42 + len(ordered_categories) * 82)
+    components.html(html, height=height_px, scrolling=False)
+
+
+def render_paired_compare_counts(round_df, bench_df, key_col, key_order, compare_mode, title, value_label="Count"):
+    """
+    Paired HTML bars for count-based comparisons like miss direction.
+    Shows Round and baseline on separate rows with visible labels.
+    """
+    if round_df.empty and bench_df.empty:
+        st.info(f"No usable {title.lower()} data found for this round / comparison group.")
+        return
+
+    r = round_df.copy()
+    b = bench_df.copy()
+
+    if key_col not in r.columns:
+        r[key_col] = pd.Series(dtype="object")
+    if key_col not in b.columns:
+        b[key_col] = pd.Series(dtype="object")
+    if "Count" not in r.columns:
+        r["Count"] = 0
+    if "Count" not in b.columns:
+        b["Count"] = 0
+    if "Pct" not in r.columns:
+        r["Pct"] = 0.0
+    if "Pct" not in b.columns:
+        b["Pct"] = 0.0
+
+    r[key_col] = r[key_col].astype(str)
+    b[key_col] = b[key_col].astype(str)
+
+    present = set(r[key_col].tolist()) | set(b[key_col].tolist())
+    ordered_categories = [str(k) for k in key_order if str(k) in present]
+    if not ordered_categories:
+        ordered_categories = sorted(present)
+
+    max_count = max(
+        float(r["Count"].max()) if not r.empty else 0.0,
+        float(b["Count"].max()) if not b.empty else 0.0,
+        1.0
+    )
+
+    html = """
+    <style>
+      .pair-wrap {background:#222; padding:12px; border-radius:12px; margin-bottom:10px;}
+      .pair-cat {margin:10px 0 14px 0; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,.08);}
+      .pair-cat:last-child {border-bottom:none; margin-bottom:0; padding-bottom:0;}
+      .pair-cat-title {font-weight:700; margin-bottom:6px; color:#fff;}
+      .pair-row {
+        display:grid;
+        grid-template-columns: 90px minmax(140px, 1fr) 120px 58px;
+        gap:10px;
+        align-items:center;
+        margin:4px 0;
+      }
+      .pair-series {font-size:12px; color:#ddd; font-weight:700;}
+      .pair-bar-bg {
+        width:100%;
+        background:#3a3a3a;
+        border-radius:999px;
+        height:18px;
+        overflow:hidden;
+        position:relative;
+      }
+      .pair-bar-fill-round {
+        height:18px;
+        border-radius:999px;
+        background:#4f8cff;
+      }
+      .pair-bar-fill-base {
+        height:18px;
+        border-radius:999px;
+        background:#8a8a8a;
+      }
+      .pair-value {
+        font-size:12px;
+        color:#fff;
+        font-variant-numeric: tabular-nums;
+        text-align:left;
+        white-space:nowrap;
+        font-weight:700;
+      }
+      .pair-delta {
+        font-size:11px;
+        font-weight:700;
+        text-align:right;
+        white-space:nowrap;
+      }
+      .pair-good {color:#64dfb5;}
+      .pair-bad {color:#ee6c4d;}
+      .pair-neutral {color:#aaa;}
+    </style>
+    <div class="pair-wrap">
+    """
+
+    for cat in ordered_categories:
+        html += f'<div class="pair-cat"><div class="pair-cat-title">{cat}</div>'
+
+        r_row = r[r[key_col] == cat]
+        b_row = b[b[key_col] == cat]
+
+        round_count = float(r_row["Count"].iloc[0]) if not r_row.empty else 0.0
+        round_pct = float(r_row["Pct"].iloc[0]) if not r_row.empty else 0.0
+        base_count = float(b_row["Count"].iloc[0]) if not b_row.empty else 0.0
+        base_pct = float(b_row["Pct"].iloc[0]) if not b_row.empty else 0.0
+        delta = round_count - base_count
+
+        for series, count, pct in [
+            ("Round", round_count, round_pct),
+            (compare_mode, base_count, base_pct),
+        ]:
+            width = 100.0 * count / max_count if max_count else 0.0
+            label = f"{int(count)} ({pct:.0f}%)"
+            fill_class = "pair-bar-fill-round" if series == "Round" else "pair-bar-fill-base"
+
+            if series == "Round":
+                if delta > 0.05:
+                    delta_cls = "pair-good"
+                    delta_txt = f"+{int(round(delta))}"
+                elif delta < -0.05:
+                    delta_cls = "pair-bad"
+                    delta_txt = f"{int(round(delta))}"
+                else:
+                    delta_cls = "pair-neutral"
+                    delta_txt = "0"
+            else:
+                delta_cls = "pair-neutral"
+                delta_txt = ""
+
+            html += f"""
+            <div class="pair-row">
+              <div class="pair-series">{series}</div>
+              <div class="pair-bar-bg">
+                <div class="{fill_class}" style="width:{max(0, min(100, width))}%;"></div>
+              </div>
+              <div class="pair-value">{label}</div>
+              <div class="pair-delta {delta_cls}">{delta_txt}</div>
+            </div>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
+
+    import streamlit.components.v1 as components
+    height_px = max(220, 42 + len(ordered_categories) * 82)
+    components.html(html, height=height_px, scrolling=False)
+
+
+
+def render_single_series_bars(summary_df, key_col, key_order, title, bar_label="GIR %"):
+    """
+    Clean single-series visible bar layout for dashboards like Shot Pattern.
+    Always shows the explicit label at right (e.g. 3/5 60%).
+    """
+    if summary_df.empty:
+        st.info(f"No usable {title.lower()} data found.")
+        return
+
+    df_plot = summary_df.copy()
+    df_plot[key_col] = df_plot[key_col].astype(str)
+    present = set(df_plot[key_col].tolist())
+    ordered_categories = [str(k) for k in key_order if str(k) in present]
+    if not ordered_categories:
+        ordered_categories = sorted(present)
+
+    html = """
+    <style>
+      .single-wrap {background:#222; padding:12px; border-radius:12px; margin-bottom:10px;}
+      .single-cat {margin:8px 0 12px 0; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,.08);}
+      .single-cat:last-child {border-bottom:none; margin-bottom:0; padding-bottom:0;}
+      .single-row {
+        display:grid;
+        grid-template-columns: 110px minmax(140px, 1fr) 130px;
+        gap:10px;
+        align-items:center;
+      }
+      .single-name {font-size:12px; color:#fff; font-weight:700; white-space:nowrap;}
+      .single-bar-bg {
+        width:100%;
+        background:#3a3a3a;
+        border-radius:999px;
+        height:18px;
+        overflow:hidden;
+        position:relative;
+      }
+      .single-bar-fill {
+        height:18px;
+        border-radius:999px;
+        background:#4f8cff;
+      }
+      .single-value {
+        font-size:12px;
+        color:#fff;
+        font-variant-numeric: tabular-nums;
+        text-align:left;
+        white-space:nowrap;
+        font-weight:700;
+      }
+    </style>
+    <div class="single-wrap">
+    """
+
+    for cat in ordered_categories:
+        row = df_plot[df_plot[key_col] == cat]
+        if row.empty:
+            pct = 0.0
+            label = "0/0 0%"
+        else:
+            pct = float(row["Pct"].iloc[0]) if "Pct" in row.columns else 0.0
+            if "DisplayLabel" in row.columns:
+                label = str(row["DisplayLabel"].iloc[0])
+            elif all(c in row.columns for c in ["Made", "Attempts", "Pct"]):
+                label = f"{int(row['Made'].iloc[0])}/{int(row['Attempts'].iloc[0])} {float(row['Pct'].iloc[0]):.0f}%"
+            else:
+                label = f"{pct:.0f}%"
+
+        html += f"""
+        <div class="single-cat">
+          <div class="single-row">
+            <div class="single-name">{cat}</div>
+            <div class="single-bar-bg">
+              <div class="single-bar-fill" style="width:{max(0, min(100, pct))}%;"></div>
+            </div>
+            <div class="single-value">{label}</div>
+          </div>
+        </div>
+        """
+
+    html += "</div>"
+    import streamlit.components.v1 as components
+    height_px = max(180, 26 + len(ordered_categories) * 48)
+    components.html(html, height=height_px, scrolling=False)
 
 
 def build_round_selector_df(src_df):
@@ -594,7 +1041,7 @@ def render_direction_heatmap(round_dir_df):
         ]
     )
 
-    txt = base.mark_text(fontWeight="bold").encode(text="Label:N")
+    txt = base.mark_text(fontWeight="bold").encode(text="DisplayLabel:N")
     st.altair_chart((rects + txt).properties(height=260), use_container_width=True)
 
 
@@ -987,71 +1434,145 @@ def build_distance_performance_curve(frame):
     return out.sort_values("Bucket").reset_index(drop=True)
 
 def render_distance_performance_curve(round_curve, bench_curve=None, compare_label="Baseline"):
+    """
+    Reliable SVG/HTML distance curve.
+    Uses components.html so it renders consistently in Streamlit.
+    """
     if round_curve is None or round_curve.empty:
         st.info("No distance performance curve data available for this round.")
         return
 
-    curve = round_curve.copy()
-    curve["Series"] = "Round"
+    round_df = round_curve.copy()
+    round_df["Bucket"] = round_df["Bucket"].astype(str)
+    round_df = round_df[round_df["Bucket"].isin(APPROACH_BUCKET_ORDER)].copy()
+    if round_df.empty:
+        st.info("No distance performance curve data available for this round.")
+        return
 
-    layers = []
+    bucket_order = [
+        b for b in APPROACH_BUCKET_ORDER
+        if b in round_df["Bucket"].tolist()
+        or (bench_curve is not None and not bench_curve.empty and b in bench_curve["Bucket"].astype(str).tolist())
+    ]
+    if not bucket_order:
+        st.info("No distance performance curve data available for this round.")
+        return
 
-    line = (
-        alt.Chart(curve)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Distance Bucket"),
-            y=alt.Y("Pct:Q", title="GIR %"),
-            tooltip=[
-                alt.Tooltip("Bucket:N"),
-                alt.Tooltip("Attempts:Q"),
-                alt.Tooltip("Made:Q"),
-                alt.Tooltip("Pct:Q", format=".1f"),
-                alt.Tooltip("AvgProx:Q", title="Avg Prox", format=".1f"),
-                alt.Tooltip("ToParPerHole:Q", title="To Par / Hole", format=".2f"),
-            ],
-        )
-        .properties(height=320)
-    )
-    layers.append(line)
+    round_df = round_df.set_index("Bucket").reindex(bucket_order).reset_index()
+    round_df["Pct"] = pd.to_numeric(round_df["Pct"], errors="coerce").fillna(0.0)
+    round_df["Made"] = pd.to_numeric(round_df["Made"], errors="coerce").fillna(0).astype(int)
+    round_df["Attempts"] = pd.to_numeric(round_df["Attempts"], errors="coerce").fillna(0).astype(int)
+    round_df["CurveLabel"] = round_df.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
 
-    curve["CurveLabel"] = curve.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
-
-    labels = (
-        alt.Chart(curve)
-        .mark_text(dy=-12, fontWeight="bold")
-        .encode(
-            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER),
-            y=alt.Y("Pct:Q"),
-            text="CurveLabel:N",
-        )
-    )
-    layers.append(labels)
-
+    base_df = None
     if bench_curve is not None and not bench_curve.empty:
-        base = bench_curve.copy()
-        base["Series"] = compare_label
-        base_line = (
-            alt.Chart(base)
-            .mark_line(point=True, strokeDash=[6,4])
-            .encode(
-                x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER),
-                y=alt.Y("Pct:Q"),
-                tooltip=[
-                    alt.Tooltip("Bucket:N"),
-                    alt.Tooltip("Attempts:Q"),
-                    alt.Tooltip("Made:Q"),
-                    alt.Tooltip("Pct:Q", title=f"{compare_label} GIR %", format=".1f"),
-                ],
-            )
-        )
-        layers.insert(0, base_line)
+        base_df = bench_curve.copy()
+        base_df["Bucket"] = base_df["Bucket"].astype(str)
+        base_df = base_df[base_df["Bucket"].isin(bucket_order)].copy()
+        if not base_df.empty:
+            base_df = base_df.set_index("Bucket").reindex(bucket_order).reset_index()
+            base_df["Pct"] = pd.to_numeric(base_df["Pct"], errors="coerce").fillna(0.0)
+            base_df["BaseLabel"] = base_df["Pct"].map(lambda x: f"{x:.0f}%")
+        else:
+            base_df = None
 
-    chart = layers[0]
-    for lyr in layers[1:]:
-        chart = chart + lyr
+    # ---------- SVG layout ----------
+    import math
+    import html as _html
+    import streamlit.components.v1 as components
 
-    st.altair_chart(chart, use_container_width=True)
+    width = 1080
+    height = 420
+    left = 72
+    right = 24
+    top = 46
+    bottom = 72
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    n = max(len(bucket_order), 1)
+    step_x = plot_w / max(n - 1, 1)
+
+    def _x(i):
+        return left + (i * step_x if n > 1 else plot_w / 2)
+
+    def _y(pct):
+        pct = max(0.0, min(100.0, float(pct)))
+        return top + plot_h * (1 - pct / 100.0)
+
+    def _points(df, col="Pct"):
+        pts = []
+        for i, row in df.iterrows():
+            pts.append((_x(i), _y(row[col])))
+        return pts
+
+    def _polyline(pts):
+        return " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+
+    round_pts = _points(round_df, "Pct")
+    base_pts = _points(base_df, "Pct") if base_df is not None else []
+
+    grid_lines = []
+    for tick in [0, 25, 50, 75, 100]:
+        y = _y(tick)
+        grid_lines.append(f'<line x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>')
+        grid_lines.append(f'<text x="{left-10}" y="{y+4:.1f}" fill="#bdbdbd" font-size="11" text-anchor="end">{tick}%</text>')
+
+    x_labels = []
+    for i, b in enumerate(bucket_order):
+        x = _x(i)
+        x_labels.append(f'<text x="{x:.1f}" y="{height-28}" fill="#d9d9d9" font-size="11" text-anchor="middle">{_html.escape(str(b))}</text>')
+
+    round_point_elems = []
+    round_label_elems = []
+    for i, row in round_df.iterrows():
+        x, y = round_pts[i]
+        round_point_elems.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="#4f8cff"/>')
+        label = _html.escape(str(row["CurveLabel"]))
+        round_label_elems.append(f'<text x="{x:.1f}" y="{max(16, y-12):.1f}" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle">{label}</text>')
+
+    base_point_elems = []
+    base_label_elems = []
+    if base_df is not None:
+        for i, row in base_df.iterrows():
+            x, y = base_pts[i]
+            base_point_elems.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="#9aa0a6"/>')
+            label = _html.escape(str(row["BaseLabel"]))
+            base_label_elems.append(f'<text x="{x:.1f}" y="{min(height-bottom+18, y+16):.1f}" fill="#bdbdbd" font-size="10" text-anchor="middle">{label}</text>')
+
+    legend = f"""
+    <g>
+      <line x1="{left}" y1="18" x2="{left+28}" y2="18" stroke="#4f8cff" stroke-width="3"/>
+      <circle cx="{left+14}" cy="18" r="4" fill="#4f8cff"/>
+      <text x="{left+38}" y="22" fill="#ffffff" font-size="12">Round</text>
+      <line x1="{left+120}" y1="18" x2="{left+148}" y2="18" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6 4"/>
+      <circle cx="{left+134}" cy="18" r="3.5" fill="#9aa0a6"/>
+      <text x="{left+158}" y="22" fill="#d0d0d0" font-size="12">{_html.escape(compare_label)}</text>
+    </g>
+    """
+
+    svg = f"""
+    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="{width}" height="{height}" fill="#1f1f1f" rx="12" ry="12"/>
+      {''.join(grid_lines)}
+      <line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+      <line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+      {legend}
+      <polyline points="{_polyline(round_pts)}" fill="none" stroke="#4f8cff" stroke-width="3"/>
+      {'<polyline points="' + _polyline(base_pts) + '" fill="none" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6 4"/>' if base_pts else ''}
+      {''.join(base_point_elems)}
+      {''.join(round_point_elems)}
+      {''.join(base_label_elems)}
+      {''.join(round_label_elems)}
+      {''.join(x_labels)}
+      <text x="{width/2:.1f}" y="{height-8}" fill="#d9d9d9" font-size="12" text-anchor="middle">Distance Bucket</text>
+      <text x="18" y="{top + plot_h/2:.1f}" fill="#d9d9d9" font-size="12" text-anchor="middle" transform="rotate(-90 18 {top + plot_h/2:.1f})">GIR %</text>
+    </svg>
+    """
+
+    components.html(svg, height=height + 8, scrolling=False)
+
+
 
 def render_dispersion_panel(frame, title="Approach Dispersion"):
     d = prepare_approach_frame(frame).copy()
@@ -1112,6 +1633,591 @@ def render_dispersion_panel(frame, title="Approach Dispersion"):
     )
 
     st.altair_chart((zero_h + zero_v + scatter + hole).configure_view(stroke=None), use_container_width=True)
+
+
+
+def build_putting_round_impact(round_data, benchmark_df):
+    """
+    Proxy putting impact based on 1-putt performance by starting-distance bucket
+    compared to the selected baseline.
+    """
+    round_putt_bucket = summarize_putting_by_bucket(round_data)
+    bench_putt_bucket = summarize_putting_by_bucket(benchmark_df)
+
+    if round_putt_bucket.empty:
+        return {
+            "attempts": 0,
+            "made": 0,
+            "pct": 0.0,
+            "expected_makes": 0.0,
+            "actual_makes": 0.0,
+            "extra_makes": 0.0,
+            "sg_putting": 0.0,
+        }
+
+    base_lookup = {
+        str(row["Bucket"]): float(row["Pct"])
+        for _, row in bench_putt_bucket.iterrows()
+        if pd.notna(row["Bucket"])
+    }
+
+    expected_makes = 0.0
+    actual_makes = float(round_putt_bucket["Made"].sum())
+    attempts = int(round_putt_bucket["Attempts"].sum())
+
+    for _, row in round_putt_bucket.iterrows():
+        bucket = str(row["Bucket"])
+        att = int(row["Attempts"])
+        base_pct = base_lookup.get(bucket, 0.0)
+        expected_makes += att * base_pct / 100.0
+
+    extra_makes = actual_makes - expected_makes
+    sg_putting = extra_makes * 0.30  # same beta conversion used elsewhere
+
+    pct = (actual_makes / attempts * 100.0) if attempts else 0.0
+
+    return {
+        "attempts": attempts,
+        "made": int(actual_makes),
+        "pct": pct,
+        "expected_makes": expected_makes,
+        "actual_makes": actual_makes,
+        "extra_makes": extra_makes,
+        "sg_putting": sg_putting,
+    }
+
+
+
+def build_distance_sg_table(round_curve, bench_curve):
+    """
+    Approx SG-style per-distance proxy from GIR% deltas.
+    """
+    if round_curve is None or round_curve.empty:
+        return pd.DataFrame(columns=["Bucket", "Round GIR %", "Baseline GIR %", "Delta", "Round Attempts", "Round Made", "Round Avg Prox", "Round To Par / Hole", "SG Proxy"])
+
+    r = round_curve.copy()
+    r["Bucket"] = r["Bucket"].astype(str)
+    out = r.rename(columns={
+        "Pct": "Round GIR %",
+        "Attempts": "Round Attempts",
+        "Made": "Round Made",
+        "AvgProx": "Round Avg Prox",
+        "ToParPerHole": "Round To Par / Hole",
+    })[["Bucket", "Round GIR %", "Round Attempts", "Round Made", "Round Avg Prox", "Round To Par / Hole"]].copy()
+
+    if bench_curve is not None and not bench_curve.empty:
+        b = bench_curve.copy()
+        b["Bucket"] = b["Bucket"].astype(str)
+        out = out.merge(
+            b.rename(columns={"Pct": "Baseline GIR %"})[["Bucket", "Baseline GIR %"]],
+            on="Bucket",
+            how="left"
+        )
+        out["Delta"] = (pd.to_numeric(out["Round GIR %"], errors="coerce").fillna(0) - pd.to_numeric(out["Baseline GIR %"], errors="coerce").fillna(0)).round(1)
+        out["SG Proxy"] = ((out["Delta"].fillna(0) / 100.0) * pd.to_numeric(out["Round Attempts"], errors="coerce").fillna(0) * 0.55).round(2)
+    else:
+        out["Baseline GIR %"] = pd.NA
+        out["Delta"] = pd.NA
+        out["SG Proxy"] = pd.NA
+
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)
+
+def render_distance_sg_heatmap(distance_sg_df):
+    if distance_sg_df is None or distance_sg_df.empty:
+        st.info("No distance SG-style data available.")
+        return
+
+    heat = distance_sg_df.copy()
+    heat["Bucket"] = heat["Bucket"].astype(str)
+    if "Metric" not in heat.columns:
+        heat["Metric"] = "Approach SG"
+    heat["CellLabel"] = heat.apply(
+        lambda r: f"{float(r['Round GIR %']):.0f}%\nΔ {float(r['Delta']):+.0f}" if pd.notna(r.get("Delta")) else f"{float(r['Round GIR %']):.0f}%",
+        axis=1
+    )
+
+    chart = (
+        alt.Chart(heat)
+        .mark_rect(cornerRadius=8, stroke="#666")
+        .encode(
+            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Distance Bucket"),
+            y=alt.Y("Metric:N", title=None),
+            color=alt.Color("SG Proxy:Q", title="SG Proxy"),
+            tooltip=[
+                alt.Tooltip("Bucket:N"),
+                alt.Tooltip("Round GIR %:Q", format=".1f"),
+                alt.Tooltip("Baseline GIR %:Q", format=".1f"),
+                alt.Tooltip("Delta:Q", format="+.1f"),
+                alt.Tooltip("Round Attempts:Q"),
+                alt.Tooltip("SG Proxy:Q", format="+.2f"),
+            ],
+        )
+        .properties(height=100)
+    )
+    text = (
+        alt.Chart(heat)
+        .mark_text(fontWeight="bold")
+        .encode(
+            x=alt.X("Bucket:N", sort=APPROACH_BUCKET_ORDER),
+            y=alt.Y("Metric:N"),
+            text="CellLabel:N",
+        )
+    )
+    st.altair_chart(chart + text, use_container_width=True)
+
+def build_distance_improvement_tracker(full_df, round_data):
+    """
+    Compare this round vs prior 20 rounds for each distance bucket.
+    """
+    player = round_data["Player Name"].iloc[0] if ("Player Name" in round_data and not round_data.empty) else None
+    if not player:
+        return pd.DataFrame(columns=["Bucket", "This Round %", "Prev 20 Rounds %", "Delta"])
+
+    hist = full_df.copy()
+    hist["Date Played"] = pd.to_datetime(hist["Date Played"], errors="coerce")
+    if "Player Name" in hist:
+        hist = hist[hist["Player Name"] == player].copy()
+
+    current_round_id = round_data["Round Link"].iloc[0] if ("Round Link" in round_data and not round_data.empty) else None
+    hist_excl = hist[hist["Round Link"] != current_round_id].copy() if current_round_id is not None else hist.copy()
+
+    if {"Round Link", "Date Played"} <= set(hist_excl.columns):
+        prev_round_ids = (
+            hist_excl[["Round Link", "Date Played"]]
+            .drop_duplicates()
+            .sort_values("Date Played", ascending=False)
+            .head(20)["Round Link"]
+            .tolist()
+        )
+        prev20 = hist_excl[hist_excl["Round Link"].isin(prev_round_ids)].copy()
+    else:
+        prev20 = hist_excl.copy()
+
+    this_curve = build_distance_performance_curve(round_data)
+    prev_curve = build_distance_performance_curve(prev20)
+
+    if this_curve is None or this_curve.empty:
+        return pd.DataFrame(columns=["Bucket", "This Round %", "Prev 20 Rounds %", "Delta"])
+
+    out = this_curve.rename(columns={"Pct": "This Round %"})[["Bucket", "This Round %"]].copy()
+    if prev_curve is not None and not prev_curve.empty:
+        out = out.merge(
+            prev_curve.rename(columns={"Pct": "Prev 20 Rounds %"})[["Bucket", "Prev 20 Rounds %"]],
+            on="Bucket",
+            how="left"
+        )
+        out["Delta"] = (pd.to_numeric(out["This Round %"], errors="coerce").fillna(0) - pd.to_numeric(out["Prev 20 Rounds %"], errors="coerce").fillna(0)).round(1)
+    else:
+        out["Prev 20 Rounds %"] = pd.NA
+        out["Delta"] = pd.NA
+
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)
+
+
+
+def build_approach_inside_proximity_summary(round_data, benchmark_df=None):
+    """
+    For each proximity/leave-distance bucket:
+    - Round approaches finishing inside that range / total approach opportunities
+    - Baseline approaches finishing inside that range / total approach opportunities
+    This measures proximity distribution, not 1-putt %.
+    """
+    round_app = prepare_approach_frame(round_data).copy()
+    bench_app = prepare_approach_frame(benchmark_df).copy() if benchmark_df is not None else pd.DataFrame()
+
+    # Use putting buckets for proximity-to-hole bins
+    round_app["Prox Bucket"] = round_app["Approach Proximity"].apply(lambda x: _bucket_value(x, PUTT_BUCKETS))
+    if not bench_app.empty:
+        bench_app["Prox Bucket"] = bench_app["Approach Proximity"].apply(lambda x: _bucket_value(x, PUTT_BUCKETS))
+
+    def _summary(df_block, label_prefix="Round"):
+        if df_block.empty:
+            return pd.DataFrame(columns=["Bucket", f"{label_prefix} Inside", f"{label_prefix} Opportunities", f"{label_prefix} %"])
+        total_opps = int(len(df_block))
+        out = (
+            df_block.dropna(subset=["Prox Bucket"])
+            .groupby("Prox Bucket", as_index=False)
+            .agg(Inside=("Approach GIR Flag", "size"))
+            .rename(columns={"Prox Bucket": "Bucket", "Inside": f"{label_prefix} Inside"})
+        )
+        out[f"{label_prefix} Opportunities"] = total_opps
+        out[f"{label_prefix} %"] = (
+            pd.to_numeric(out[f"{label_prefix} Inside"], errors="coerce").fillna(0)
+            / max(total_opps, 1) * 100
+        ).round(1)
+        return out
+
+    round_sum = _summary(round_app, "Round")
+    if benchmark_df is not None:
+        bench_sum = _summary(bench_app, "Baseline")
+        out = round_sum.merge(bench_sum, on="Bucket", how="outer")
+        out["Delta"] = (
+            pd.to_numeric(out["Round %"], errors="coerce").fillna(0)
+            - pd.to_numeric(out["Baseline %"], errors="coerce").fillna(0)
+        ).round(1)
+    else:
+        out = round_sum.copy()
+        out["Baseline Inside"] = pd.NA
+        out["Baseline Opportunities"] = pd.NA
+        out["Baseline %"] = pd.NA
+        out["Delta"] = pd.NA
+
+    if not out.empty:
+        out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
+        out = out.sort_values("Bucket").reset_index(drop=True)
+        out["DisplayLabel"] = out.apply(
+            lambda r: f"{_safe_int_scalar(r.get('Round Inside', 0))}/{_safe_int_scalar(r.get('Round Opportunities', 0))} {_safe_float_scalar(r.get('Round %', 0)):.0f}%",
+            axis=1
+        )
+    return out
+
+def build_filtered_approach_proximity_distribution(frame):
+    """
+    Build a single-series distribution of approach shots by resulting proximity bucket.
+    """
+    app = prepare_approach_frame(frame).copy()
+    if app.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "DisplayLabel"])
+    app["Prox Bucket"] = app["Approach Proximity"].apply(lambda x: _bucket_value(x, PUTT_BUCKETS))
+    total = int(len(app))
+    out = (
+        app.dropna(subset=["Prox Bucket"])
+        .groupby("Prox Bucket", as_index=False)
+        .agg(Attempts=("Approach GIR Flag", "size"))
+        .rename(columns={"Prox Bucket": "Bucket"})
+    )
+    out["Made"] = out["Attempts"]
+    out["Pct"] = (pd.to_numeric(out["Attempts"], errors="coerce").fillna(0) / max(total, 1) * 100).round(1)
+    out["DisplayLabel"] = out.apply(lambda r: f"{int(r['Attempts'])}/{total} {r['Pct']:.0f}%", axis=1)
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)
+
+
+def apply_approach_filters(frame, yard_buckets=None, clubs=None, courses=None, fairway_vals=None, par_vals=None):
+    d = prepare_approach_frame(frame).copy()
+    if d.empty:
+        return d
+
+    if yard_buckets:
+        d = d[d["Approach Bucket"].astype(str).isin([str(x) for x in yard_buckets])].copy()
+    if clubs:
+        d = d[d["Approach Club"].astype(str).isin([str(x) for x in clubs])].copy()
+    if courses and "Course Name" in d.columns:
+        d = d[d["Course Name"].astype(str).isin([str(x) for x in courses])].copy()
+    if fairway_vals is not None and len(fairway_vals) > 0:
+        fairway_num = pd.to_numeric(_safe_col(d, "Fairway", pd.NA), errors="coerce")
+        d = d[fairway_num.isin(fairway_vals)].copy()
+    if par_vals is not None and len(par_vals) > 0:
+        par_num = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+        d = d[par_num.isin(par_vals)].copy()
+    return d
+
+def build_approach_proximity_compare(round_filtered, bench_filtered):
+    """
+    Compare resulting proximity distribution bucket share for Round vs baseline.
+    """
+    def _summary(df_block, prefix="Round"):
+        app = prepare_approach_frame(df_block).copy() if "Approach Proximity" not in df_block.columns else df_block.copy()
+        if app.empty:
+            return pd.DataFrame(columns=["Bucket", f"{prefix} Made", f"{prefix} Attempts", f"{prefix} Pct"])
+        app["Prox Bucket"] = app["Approach Proximity"].apply(lambda x: _bucket_value(x, PUTT_BUCKETS))
+        total = int(len(app))
+        out = (
+            app.dropna(subset=["Prox Bucket"])
+            .groupby("Prox Bucket", as_index=False)
+            .agg(Made=("Approach GIR Flag", "size"))
+            .rename(columns={"Prox Bucket": "Bucket", "Made": f"{prefix} Made"})
+        )
+        out[f"{prefix} Attempts"] = total
+        out[f"{prefix} Pct"] = (pd.to_numeric(out[f"{prefix} Made"], errors="coerce").fillna(0) / max(total,1) * 100).round(1)
+        return out
+
+    r = _summary(round_filtered, "Round")
+    b = _summary(bench_filtered, "Baseline")
+    out = r.merge(b, on="Bucket", how="outer")
+    if not out.empty:
+        out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
+        out = out.sort_values("Bucket").reset_index(drop=True)
+    return out
+
+def build_filtered_approach_metrics(frame):
+    app = prepare_approach_frame(frame).copy()
+    if app.empty:
+        return {"attempts": 0, "gir": 0, "gir_pct": 0.0, "avg_prox": 0.0, "inside15": 0, "inside15_pct": 0.0}
+    attempts = int(len(app))
+    gir = int(pd.to_numeric(app["Approach GIR Flag"], errors="coerce").fillna(0).sum())
+    gir_pct = (gir / attempts * 100.0) if attempts else 0.0
+    avg_prox = float(pd.to_numeric(app["Approach Proximity"], errors="coerce").fillna(0).mean()) if attempts else 0.0
+    inside15 = int((pd.to_numeric(app["Approach Proximity"], errors="coerce").fillna(9999) <= 15).sum())
+    inside15_pct = (inside15 / attempts * 100.0) if attempts else 0.0
+    return {"attempts": attempts, "gir": gir, "gir_pct": gir_pct, "avg_prox": avg_prox, "inside15": inside15, "inside15_pct": inside15_pct}
+
+
+def build_short_game_inside_range_summary(round_data, benchmark_df_sg=None):
+    """
+    For each short-game leave-distance bucket:
+    - Round chips finishing inside that range / total chip opportunities
+    - Benchmark chips finishing inside that range / total chip opportunities
+    This measures chipping performance into those leave distances, not 1-putt % from there.
+    """
+    round_sg = prepare_short_game_frame(round_data).copy()
+    bench_sg = prepare_short_game_frame(benchmark_df_sg).copy() if benchmark_df_sg is not None else pd.DataFrame()
+
+    def _summary(df_block, label_prefix="Round"):
+        if df_block.empty:
+            return pd.DataFrame(columns=["Bucket", f"{label_prefix} Inside", f"{label_prefix} Opportunities", f"{label_prefix} %"])
+        total_opps = int(len(df_block))
+        out = (
+            df_block.dropna(subset=["SG Bucket"])
+            .groupby("SG Bucket", as_index=False)
+            .agg(Inside=("SG Attempt", "sum"))
+            .rename(columns={"SG Bucket": "Bucket", "Inside": f"{label_prefix} Inside"})
+        )
+        out[f"{label_prefix} Opportunities"] = total_opps
+        out[f"{label_prefix} %"] = (
+            pd.to_numeric(out[f"{label_prefix} Inside"], errors="coerce").fillna(0)
+            / max(total_opps, 1) * 100
+        ).round(1)
+        return out
+
+    round_sum = _summary(round_sg, "Round")
+    if benchmark_df_sg is not None:
+        bench_sum = _summary(bench_sg, "Baseline")
+        out = round_sum.merge(bench_sum, on="Bucket", how="outer")
+        out["Delta"] = (
+            pd.to_numeric(out["Round %"], errors="coerce").fillna(0)
+            - pd.to_numeric(out["Baseline %"], errors="coerce").fillna(0)
+        ).round(1)
+    else:
+        out = round_sum.copy()
+        out["Baseline Inside"] = pd.NA
+        out["Baseline Opportunities"] = pd.NA
+        out["Baseline %"] = pd.NA
+        out["Delta"] = pd.NA
+
+    if not out.empty:
+        out["Bucket"] = pd.Categorical(out["Bucket"], categories=SHORT_GAME_BUCKET_ORDER, ordered=True)
+        out = out.sort_values("Bucket").reset_index(drop=True)
+        out["DisplayLabel"] = out.apply(
+            lambda r: f"{_safe_int_scalar(r.get('Round Inside', 0))}/{_safe_int_scalar(r.get('Round Opportunities', 0))} {_safe_float_scalar(r.get('Round %', 0)):.0f}%",
+            axis=1
+        )
+    return out
+
+def build_short_game_extra_stats(round_data):
+    """
+    Uses explicit short-game fields from the dataset:
+    - Total Chips Per Hole
+    - Chip Opportunity
+    """
+    d = round_data.copy()
+
+    chips = pd.to_numeric(_safe_col(d, "Total Chips Per Hole", 0), errors="coerce").fillna(0)
+    opportunities = pd.to_numeric(_safe_col(d, "Chip Opportunity", 0), errors="coerce").fillna(0)
+
+    total_chips = int(chips.sum())
+    total_opportunities = int(opportunities.sum())
+    chips_per_hole = (total_chips / total_opportunities) if total_opportunities else 0.0
+    holes_2plus = int((chips >= 2).sum())
+
+    return {
+        "opportunities": total_opportunities,
+        "total_chips": total_chips,
+        "chips_per_hole": chips_per_hole,
+        "holes_2plus": holes_2plus,
+    }
+
+
+
+
+def build_us_open_par_summary(frame):
+    """
+    US Open Par
+    Attempt:
+      - Par 4 or Par 5
+      - Approach GIR = Yes
+    Made:
+      - Attempt
+      - Putts = 1
+      - Score to Par = 0
+    """
+    d = frame.copy()
+    d["ParN"] = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+    d["ApproachGIR"] = pd.to_numeric(_safe_col(d, "Approach GIR Value", 0), errors="coerce").fillna(0).astype(int)
+    d["PuttsN"] = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0).astype(int)
+
+    if "Score to Par" in d.columns:
+        d["ScoreToParN"] = pd.to_numeric(_safe_col(d, "Score to Par", pd.NA), errors="coerce")
+    else:
+        d["HoleScoreN"] = pd.to_numeric(_safe_col(d, "Hole Score", pd.NA), errors="coerce")
+        d["ScoreToParN"] = d["HoleScoreN"] - d["ParN"]
+
+    d["USOpenAttempt"] = ((d["ParN"].isin([4, 5])) & (d["ApproachGIR"] == 1)).astype(int)
+    d["USOpenMade"] = ((d["USOpenAttempt"] == 1) & (d["PuttsN"] == 1) & (d["ScoreToParN"] == 0)).astype(int)
+
+    attempts = int(d["USOpenAttempt"].sum())
+    made = int(d["USOpenMade"].sum())
+    pct = (made / attempts * 100.0) if attempts else 0.0
+
+    return {"attempts": attempts, "made": made, "pct": pct}
+
+
+
+
+APPROACH_CLUB_ORDER = [
+    "LW", "SW", "GW", "AW", "PW",
+    "9I", "8I", "7I", "6I", "5I", "4I", "3I", "2I", "1I",
+    "HY", "2H", "3H", "4H", "5H", "6H", "7H",
+    "7W", "5W", "4W", "3W", "2W", "1W", "DRIVER"
+]
+
+def _club_sort_key(club):
+    c = str(club).strip().upper()
+    if c in APPROACH_CLUB_ORDER:
+        return APPROACH_CLUB_ORDER.index(c)
+    return len(APPROACH_CLUB_ORDER) + 100
+
+def render_club_performance_curve(round_club, bench_club=None, compare_label="Baseline"):
+    """
+    Reliable SVG/HTML club performance curve.
+    X-axis tapers from wedges to longer clubs.
+    """
+    if round_club is None or round_club.empty:
+        st.info("No club performance curve data available for this round.")
+        return
+
+    round_df = round_club.copy()
+    round_df["Club"] = round_df["Club"].astype(str).str.upper()
+    round_df = round_df[round_df["Club"] != ""].copy()
+    if round_df.empty:
+        st.info("No club performance curve data available for this round.")
+        return
+
+    bench_df = bench_club.copy() if bench_club is not None and not bench_club.empty else pd.DataFrame()
+
+    present_round = set(round_df["Club"].tolist())
+    present_bench = set(bench_df["Club"].astype(str).str.upper().tolist()) if not bench_df.empty else set()
+    club_order = [c for c in APPROACH_CLUB_ORDER if c in present_round or c in present_bench]
+
+    # also include any unusual clubs after the known ordering
+    extras = sorted((present_round | present_bench) - set(club_order), key=lambda x: str(x))
+    club_order.extend(extras)
+
+    if not club_order:
+        st.info("No club performance curve data available for this round.")
+        return
+
+    round_df = round_df.set_index("Club").reindex(club_order).reset_index()
+    round_df["Pct"] = pd.to_numeric(round_df["Pct"], errors="coerce").fillna(0.0)
+    round_df["Made"] = pd.to_numeric(round_df["Made"], errors="coerce").fillna(0).astype(int)
+    round_df["Attempts"] = pd.to_numeric(round_df["Attempts"], errors="coerce").fillna(0).astype(int)
+    round_df["CurveLabel"] = round_df.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
+
+    base_df = None
+    if not bench_df.empty:
+        bench_df["Club"] = bench_df["Club"].astype(str).str.upper()
+        bench_df = bench_df[bench_df["Club"].isin(club_order)].copy()
+        if not bench_df.empty:
+            bench_df = bench_df.set_index("Club").reindex(club_order).reset_index()
+            bench_df["Pct"] = pd.to_numeric(bench_df["Pct"], errors="coerce").fillna(0.0)
+            bench_df["BaseLabel"] = bench_df["Pct"].map(lambda x: f"{x:.0f}%")
+            base_df = bench_df
+
+    import html as _html
+    import streamlit.components.v1 as components
+
+    width = 1080
+    height = 420
+    left = 72
+    right = 24
+    top = 46
+    bottom = 72
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    n = max(len(club_order), 1)
+    step_x = plot_w / max(n - 1, 1)
+
+    def _x(i):
+        return left + (i * step_x if n > 1 else plot_w / 2)
+
+    def _y(pct):
+        pct = max(0.0, min(100.0, float(pct)))
+        return top + plot_h * (1 - pct / 100.0)
+
+    def _points(df, col="Pct"):
+        pts = []
+        for i, row in df.iterrows():
+            pts.append((_x(i), _y(row[col])))
+        return pts
+
+    def _polyline(pts):
+        return " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+
+    round_pts = _points(round_df, "Pct")
+    base_pts = _points(base_df, "Pct") if base_df is not None else []
+
+    grid_lines = []
+    for tick in [0, 25, 50, 75, 100]:
+        y = _y(tick)
+        grid_lines.append(f'<line x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>')
+        grid_lines.append(f'<text x="{left-10}" y="{y+4:.1f}" fill="#bdbdbd" font-size="11" text-anchor="end">{tick}%</text>')
+
+    x_labels = []
+    for i, c in enumerate(club_order):
+        x = _x(i)
+        x_labels.append(f'<text x="{x:.1f}" y="{height-28}" fill="#d9d9d9" font-size="11" text-anchor="middle">{_html.escape(str(c))}</text>')
+
+    round_point_elems = []
+    round_label_elems = []
+    for i, row in round_df.iterrows():
+        x, y = round_pts[i]
+        round_point_elems.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="#4f8cff"/>')
+        label = _html.escape(str(row["CurveLabel"]))
+        round_label_elems.append(f'<text x="{x:.1f}" y="{max(16, y-12):.1f}" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle">{label}</text>')
+
+    base_point_elems = []
+    base_label_elems = []
+    if base_df is not None:
+        for i, row in base_df.iterrows():
+            x, y = base_pts[i]
+            base_point_elems.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="#9aa0a6"/>')
+            label = _html.escape(str(row["BaseLabel"]))
+            base_label_elems.append(f'<text x="{x:.1f}" y="{min(height-bottom+18, y+16):.1f}" fill="#bdbdbd" font-size="10" text-anchor="middle">{label}</text>')
+
+    legend = f"""
+    <g>
+      <line x1="{left}" y1="18" x2="{left+28}" y2="18" stroke="#4f8cff" stroke-width="3"/>
+      <circle cx="{left+14}" cy="18" r="4" fill="#4f8cff"/>
+      <text x="{left+38}" y="22" fill="#ffffff" font-size="12">Round</text>
+      <line x1="{left+120}" y1="18" x2="{left+148}" y2="18" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6 4"/>
+      <circle cx="{left+134}" cy="18" r="3.5" fill="#9aa0a6"/>
+      <text x="{left+158}" y="22" fill="#d0d0d0" font-size="12">{_html.escape(compare_label)}</text>
+    </g>
+    """
+
+    svg = f"""
+    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="{width}" height="{height}" fill="#1f1f1f" rx="12" ry="12"/>
+      {''.join(grid_lines)}
+      <line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+      <line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" stroke="rgba(255,255,255,0.20)" stroke-width="1"/>
+      {legend}
+      <polyline points="{_polyline(round_pts)}" fill="none" stroke="#4f8cff" stroke-width="3"/>
+      {'<polyline points="' + _polyline(base_pts) + '" fill="none" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6 4"/>' if base_pts else ''}
+      {''.join(base_point_elems)}
+      {''.join(round_point_elems)}
+      {''.join(base_label_elems)}
+      {''.join(round_label_elems)}
+      {''.join(x_labels)}
+      <text x="{width/2:.1f}" y="{height-8}" fill="#d9d9d9" font-size="12" text-anchor="middle">Approach Club</text>
+      <text x="18" y="{top + plot_h/2:.1f}" fill="#d9d9d9" font-size="12" text-anchor="middle" transform="rotate(-90 18 {top + plot_h/2:.1f})">GIR %</text>
+    </svg>
+    """
+    components.html(svg, height=height + 8, scrolling=False)
+
 
 # =========================================================
 # Load + base prep
@@ -1553,6 +2659,11 @@ with tab_scorecard:
     <b>📊 Round Totals — {holes_played} Holes</b>
     """
 
+    us_open_summary = build_us_open_par_summary(round_data)
+    us_open_made = int(us_open_summary["made"])
+    us_open_attempts = int(us_open_summary["attempts"])
+    us_open_pct = float(us_open_summary["pct"])
+
     cards_html = f"""
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin:8px 0 4px 0;">
       <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:10px;">
@@ -1578,6 +2689,10 @@ with tab_scorecard:
       <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:10px;">
         <div style="font-size:12px;color:#aaa;">Up & Downs</div>
         <div style="font-size:22px;font-weight:700;">{updowns_display}</div>
+      </div>
+      <div style="flex:1; min-width:160px; background:#2a2a2a; border-radius:12px; padding:10px;">
+        <div style="font-size:12px;color:#aaa;">US Open Pars</div>
+        <div style="font-size:22px;font-weight:700;">{us_open_made}/{us_open_attempts} <span style="font-size:14px;color:#bbb;">({us_open_pct:.1f}%)</span></div>
       </div>
     </div>
     """
@@ -1945,64 +3060,24 @@ with tab_approach:
     with k4:
         st.metric(f"{compare_mode} GIR", f"{bench_gir_made}/{bench_attempts}", f"{bench_gir_pct:.1f}%")
 
+    round_us_open = build_us_open_par_summary(round_data)
+    bench_us_open = build_us_open_par_summary(benchmark_df)
+
+    k5 = st.columns(1)[0]
+    with k5:
+        st.metric(
+            "US Open Pars",
+            f'{round_us_open["made"]}/{round_us_open["attempts"]} ({round_us_open["pct"]:.1f}%)',
+            f'{round_us_open["pct"] - bench_us_open["pct"]:+.1f}% vs {compare_mode}'
+        )
+
     st.markdown("#### Approach GIR by Distance Bucket")
     round_dist = summarize_approach_by_bucket(round_data)
     bench_dist = summarize_approach_by_bucket(benchmark_df)
 
     dist_long = build_compare_long(round_dist, bench_dist, "Bucket", round_label="Round", bench_label=compare_mode)
     if not dist_long.empty:
-        dist_long["Bucket"] = pd.Categorical(dist_long["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
-        dist_long = dist_long.sort_values(["Bucket", "Series"]).copy()
-
-        chart = (
-            alt.Chart(dist_long)
-            .mark_bar()
-            .encode(
-                y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Distance Bucket"),
-                x=alt.X("Pct:Q", title="GIR %"),
-                color=alt.Color("Series:N", title="Series"),
-                xOffset="Series:N",
-                tooltip=[
-                    alt.Tooltip("Bucket:N"),
-                    alt.Tooltip("Series:N"),
-                    alt.Tooltip("Made:Q"),
-                    alt.Tooltip("Attempts:Q"),
-                    alt.Tooltip("Pct:Q", format=".1f"),
-                    alt.Tooltip("Label:N", title="Summary"),
-                ],
-            )
-            .properties(height=max(320, len(APPROACH_BUCKET_ORDER) * 28))
-        )
-
-        round_labels_df = dist_long[dist_long["Series"] == "Round"].copy()
-        label_chart = (
-            alt.Chart(round_labels_df)
-            .mark_text(align="left", dx=6)
-            .encode(
-                y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER),
-                x=alt.X("Pct:Q"),
-                text="Label:N",
-            )
-        )
-
-        marker_src = bench_dist.copy()
-        if not marker_src.empty:
-            marker_chart = (
-                alt.Chart(marker_src)
-                .mark_tick(thickness=3, size=22, color="white")
-                .encode(
-                    y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER),
-                    x=alt.X("Pct:Q"),
-                    tooltip=[
-                        alt.Tooltip("Bucket:N"),
-                        alt.Tooltip("Pct:Q", title=f"{compare_mode} GIR %", format=".1f"),
-                        alt.Tooltip("Label:N", title=compare_mode),
-                    ],
-                )
-            )
-            st.altair_chart(chart + label_chart + marker_chart, use_container_width=True)
-        else:
-            st.altair_chart(chart + label_chart, use_container_width=True)
+        render_paired_compare_bars(dist_long, "Bucket", APPROACH_BUCKET_ORDER, compare_mode, "Distance Bucket", "GIR %")
 
         dist_table = pd.merge(
             round_dist.rename(columns={"Attempts":"Round Attempts","Made":"Round Made","Pct":"Round %","AvgProx":"Round Avg Prox"}),
@@ -2027,23 +3102,59 @@ with tab_approach:
     else:
         st.info("No usable distance bucket data found for this round / comparison group.")
 
+    st.markdown("#### Approach Proximity Ranges")
+    prox_inside_df = build_approach_inside_proximity_summary(round_data, benchmark_df)
+    if not prox_inside_df.empty:
+        prox_long = pd.DataFrame({
+            "Bucket": list(prox_inside_df["Bucket"].astype(str)) * 2,
+            "Series": ["Round"] * len(prox_inside_df) + [compare_mode] * len(prox_inside_df),
+            "Made": list(pd.to_numeric(prox_inside_df["Round Inside"], errors="coerce").fillna(0).astype(int))
+                    + list(pd.to_numeric(prox_inside_df["Baseline Inside"], errors="coerce").fillna(0).astype(int)),
+            "Attempts": list(pd.to_numeric(prox_inside_df["Round Opportunities"], errors="coerce").fillna(0).astype(int))
+                        + list(pd.to_numeric(prox_inside_df["Baseline Opportunities"], errors="coerce").fillna(0).astype(int)),
+            "Pct": list(pd.to_numeric(prox_inside_df["Round %"], errors="coerce").fillna(0.0))
+                   + list(pd.to_numeric(prox_inside_df["Baseline %"], errors="coerce").fillna(0.0)),
+            "Label": list(prox_inside_df["DisplayLabel"])
+                     + [
+                        f"{_safe_int_scalar(r.get('Baseline Inside', 0))}/{_safe_int_scalar(r.get('Baseline Opportunities', 0))} {_safe_float_scalar(r.get('Baseline %', 0)):.0f}%"
+                        for _, r in prox_inside_df.iterrows()
+                     ],
+        })
+        render_paired_compare_bars(prox_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode, "Proximity Bucket", "Approach-Inside %")
+        st.dataframe(prox_inside_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No approach proximity-range data found for this round / comparison group.")
+
     st.markdown("#### Distance Performance Curve")
     round_curve = build_distance_performance_curve(round_data)
     bench_curve = build_distance_performance_curve(benchmark_df)
     render_distance_performance_curve(round_curve, bench_curve, compare_label=compare_mode)
 
     if not round_curve.empty:
-        st.dataframe(
-            round_curve.rename(columns={
-                "Attempts": "Round Attempts",
-                "Made": "Round Made",
-                "Pct": "Round GIR %",
-                "AvgProx": "Round Avg Prox",
-                "ToParPerHole": "Round To Par / Hole",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
+        curve_table = round_curve.rename(columns={
+            "Attempts": "Round Attempts",
+            "Made": "Round Made",
+            "Pct": "Round GIR %",
+            "AvgProx": "Round Avg Prox",
+            "ToParPerHole": "Round To Par / Hole",
+        })
+        st.dataframe(curve_table, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Distance SG Heatmap")
+        dist_sg_df = build_distance_sg_table(round_curve, bench_curve)
+        if not dist_sg_df.empty:
+            dist_sg_df["Metric"] = "Approach SG"
+            render_distance_sg_heatmap(dist_sg_df.copy())
+            st.dataframe(dist_sg_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No distance SG-style data available.")
+
+        st.markdown("#### Distance Improvement Tracker")
+        improvement_df = build_distance_improvement_tracker(df, round_data)
+        if not improvement_df.empty:
+            st.dataframe(improvement_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No distance improvement tracker data available.")
 
     st.markdown("#### Approach Dispersion Plot")
     render_dispersion_panel(round_data, title="Round Approach Dispersion")
@@ -2068,33 +3179,35 @@ with tab_approach:
 
     club_long = build_compare_long(round_club, bench_club, "Club", round_label="Round", bench_label=compare_mode)
     if not club_long.empty:
-        club_order = club_long.groupby("Club", as_index=False)["Attempts"].sum().sort_values(["Attempts", "Club"], ascending=[False, True])["Club"].tolist()
-        club_chart = (
-            alt.Chart(club_long)
-            .mark_bar()
-            .encode(
-                y=alt.Y("Club:N", sort=club_order, title="Club"),
-                x=alt.X("Pct:Q", title="GIR %"),
-                color=alt.Color("Series:N", title="Series"),
-                xOffset="Series:N",
-                tooltip=[alt.Tooltip("Club:N"), alt.Tooltip("Series:N"), alt.Tooltip("Made:Q"), alt.Tooltip("Attempts:Q"), alt.Tooltip("Pct:Q", format=".1f"), alt.Tooltip("Label:N", title="Summary")]
+        # Only keep clubs actually used in the selected round for the chart + table
+        round_used_clubs = round_club["Club"].dropna().astype(str).tolist()
+        club_long = club_long[club_long["Club"].astype(str).isin(round_used_clubs)].copy()
+
+        if not club_long.empty:
+            club_order = (
+                round_club[round_club["Club"].astype(str).isin(round_used_clubs)]
+                .sort_values(["Attempts", "Pct", "Club"], ascending=[False, False, True])["Club"]
+                .astype(str)
+                .tolist()
             )
-            .properties(height=max(320, len(club_order) * 28))
-        )
-        round_club_labels = club_long[club_long["Series"] == "Round"].copy()
-        club_label_chart = alt.Chart(round_club_labels).mark_text(align="left", dx=6).encode(y=alt.Y("Club:N", sort=club_order), x=alt.X("Pct:Q"), text="Label:N")
-        st.altair_chart(club_chart + club_label_chart, use_container_width=True)
+            render_paired_compare_bars(club_long, "Club", club_order, compare_mode, "Club", "GIR %")
 
         club_table = pd.merge(
             round_club.rename(columns={"Attempts": "Round Attempts", "Made": "Round Made", "Pct": "Round GIR %", "AvgProx": "Round Avg Prox"}),
             bench_club.rename(columns={"Attempts": f"{compare_mode} Attempts", "Made": f"{compare_mode} Made", "Pct": f"{compare_mode} GIR %", "AvgProx": f"{compare_mode} Avg Prox"}),
             on="Club",
-            how="outer"
+            how="left"
         )
-        st.dataframe(club_table.sort_values(["Round Attempts", f"{compare_mode} Attempts"], ascending=False), use_container_width=True, hide_index=True)
+        club_table = club_table[club_table["Club"].astype(str).isin(round_used_clubs)].copy()
+        club_table["_club_sort"] = club_table["Club"].astype(str).apply(_club_sort_key)
+        st.dataframe(club_table.sort_values(["_club_sort", "Round Attempts"], ascending=[True, False]).drop(columns=["_club_sort"]), use_container_width=True, hide_index=True)
+
+        st.markdown("#### Club Performance Curve")
+        render_club_performance_curve(round_club, bench_club, compare_label=compare_mode)
 
         st.markdown("#### Club Performance Ranking")
         club_rank = build_club_rank_table(round_club, bench_club)
+        club_rank = club_rank[club_rank["Club"].astype(str).isin(round_used_clubs)].copy()
         st.dataframe(club_rank, use_container_width=True, hide_index=True)
     else:
         st.info("No usable approach club data found for this round / comparison group.")
@@ -2103,21 +3216,15 @@ with tab_approach:
     round_dir = summarize_approach_miss_direction(round_data)
     bench_dir = summarize_approach_miss_direction(benchmark_df)
     if not round_dir.empty or not bench_dir.empty:
-        dir_long = pd.concat([round_dir.assign(Series="Round"), bench_dir.assign(Series=compare_mode)], ignore_index=True)
-        dir_order = dir_long.groupby("Direction", as_index=False)["Count"].sum().sort_values(["Count", "Direction"], ascending=[False, True])["Direction"].tolist()
-        dir_chart = (
-            alt.Chart(dir_long)
-            .mark_bar()
-            .encode(
-                y=alt.Y("Direction:N", sort=dir_order, title="Direction"),
-                x=alt.X("Count:Q", title="Miss Count"),
-                color=alt.Color("Series:N", title="Series"),
-                xOffset="Series:N",
-                tooltip=[alt.Tooltip("Direction:N"), alt.Tooltip("Series:N"), alt.Tooltip("Count:Q"), alt.Tooltip("Pct:Q", format=".1f")]
-            )
-            .properties(height=max(280, len(dir_order) * 28))
+        dir_order = (
+            pd.concat([round_dir[["Direction", "Count"]], bench_dir[["Direction", "Count"]]], ignore_index=True)
+            .groupby("Direction", as_index=False)["Count"]
+            .sum()
+            .sort_values(["Count", "Direction"], ascending=[False, True])["Direction"]
+            .tolist()
         )
-        st.altair_chart(dir_chart, use_container_width=True)
+
+        render_paired_compare_counts(round_dir, bench_dir, "Direction", dir_order, compare_mode, "Direction", "Count")
 
         dir_table = pd.merge(
             round_dir.rename(columns={"Count": "Round Count", "Pct": "Round %"}),
@@ -2142,58 +3249,167 @@ with tab_approach:
     st.markdown("#### Distance vs Club Heatmap")
     render_distance_club_heatmap(round_data, title="Round Distance vs Club Heatmap")
 
+    st.markdown("#### Approach Filter View (Club / Yardage / Course)")
+    filter_options_base = build_shot_pattern_frame(df, player)
+    if not filter_options_base.empty:
+        fa1, fa2, fa3 = st.columns(3)
+        with fa1:
+            yard_options = [b for b in APPROACH_BUCKET_ORDER if b in filter_options_base["Approach Bucket"].dropna().astype(str).tolist()]
+            approach_yards = st.multiselect("Yardage Buckets", yard_options, default=[], key="approach_filter_yards_multi")
+        with fa2:
+            club_options = sorted([c for c in filter_options_base["Approach Club"].dropna().unique().tolist() if str(c).strip() != ""])
+            approach_clubs = st.multiselect("Clubs", club_options, default=[], key="approach_filter_clubs_multi")
+        with fa3:
+            course_options = sorted([c for c in filter_options_base["Course Name"].dropna().unique().tolist()]) if "Course Name" in filter_options_base else []
+            approach_courses = st.multiselect("Courses", course_options, default=[], key="approach_filter_courses_multi")
+
+        fa4, fa5 = st.columns(2)
+        with fa4:
+            fairway_labels = {1: "Fairway Hit", 0: "Fairway Miss"}
+            approach_fairway_labels = st.multiselect("Fairway", list(fairway_labels.values()), default=[], key="approach_filter_fairway_multi")
+            approach_fairway_vals = [k for k, v in fairway_labels.items() if v in approach_fairway_labels]
+        with fa5:
+            par_options = [3, 4, 5]
+            approach_pars = st.multiselect("Hole Par", par_options, default=[], key="approach_filter_par_multi")
+
+        round_filter_view = apply_approach_filters(
+            round_data,
+            yard_buckets=approach_yards,
+            clubs=approach_clubs,
+            courses=approach_courses,
+            fairway_vals=approach_fairway_vals,
+            par_vals=approach_pars,
+        )
+        bench_filter_view = apply_approach_filters(
+            benchmark_df,
+            yard_buckets=approach_yards,
+            clubs=approach_clubs,
+            courses=approach_courses,
+            fairway_vals=approach_fairway_vals,
+            par_vals=approach_pars,
+        )
+
+        filt_metrics = build_filtered_approach_metrics(round_filter_view)
+        bench_metrics = build_filtered_approach_metrics(bench_filter_view)
+
+        fb1, fb2, fb3, fb4 = st.columns(4)
+        with fb1:
+            st.metric("Filtered Attempts", filt_metrics["attempts"], f'{filt_metrics["attempts"] - bench_metrics["attempts"]:+d}')
+        with fb2:
+            st.metric("Filtered GIR", f'{filt_metrics["gir"]}/{filt_metrics["attempts"]}', f'{filt_metrics["gir_pct"] - bench_metrics["gir_pct"]:+.1f}%')
+        with fb3:
+            st.metric("Avg Proximity", f'{filt_metrics["avg_prox"]:.1f} ft', f'{bench_metrics["avg_prox"] - filt_metrics["avg_prox"]:+.1f} ft')
+        with fb4:
+            st.metric("Inside 15 ft", f'{filt_metrics["inside15"]}/{filt_metrics["attempts"]}', f'{filt_metrics["inside15_pct"] - bench_metrics["inside15_pct"]:+.1f}%')
+
+        prox_compare = build_approach_proximity_compare(round_filter_view, bench_filter_view)
+        if not prox_compare.empty:
+            prox_long = pd.DataFrame({
+                "Bucket": list(prox_compare["Bucket"].astype(str)) * 2,
+                "Series": ["Round"] * len(prox_compare) + [compare_mode] * len(prox_compare),
+                "Made": list(pd.to_numeric(prox_compare["Round Made"], errors="coerce").fillna(0).astype(int))
+                        + list(pd.to_numeric(prox_compare["Baseline Made"], errors="coerce").fillna(0).astype(int)),
+                "Attempts": list(pd.to_numeric(prox_compare["Round Attempts"], errors="coerce").fillna(0).astype(int))
+                            + list(pd.to_numeric(prox_compare["Baseline Attempts"], errors="coerce").fillna(0).astype(int)),
+                "Pct": list(pd.to_numeric(prox_compare["Round Pct"], errors="coerce").fillna(0.0))
+                       + list(pd.to_numeric(prox_compare["Baseline Pct"], errors="coerce").fillna(0.0)),
+                "Label": [
+                    f"{_safe_int_scalar(r.get('Round Made', 0))}/{_safe_int_scalar(r.get('Round Attempts', 0))} {_safe_float_scalar(r.get('Round Pct', 0)):.0f}%"
+                    for _, r in prox_compare.iterrows()
+                ] + [
+                    f"{_safe_int_scalar(r.get('Baseline Made', 0))}/{_safe_int_scalar(r.get('Baseline Attempts', 0))} {_safe_float_scalar(r.get('Baseline Pct', 0)):.0f}%"
+                    for _, r in prox_compare.iterrows()
+                ],
+            })
+            st.markdown("##### Filtered Proximity Distribution")
+            render_paired_compare_bars(prox_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode, "Proximity Bucket", "Share %")
+            st.dataframe(prox_compare, use_container_width=True, hide_index=True)
+        else:
+            st.info("No filtered proximity distribution available.")
+    else:
+        st.info("No approach filter-view data available.")
+
     st.markdown("#### Shot Pattern Dashboard")
-    shot_base = build_shot_pattern_frame(df, player)
-    if not shot_base.empty:
+    shot_options_base = build_shot_pattern_frame(df, player)
+    if not shot_options_base.empty:
         sp1, sp2, sp3 = st.columns(3)
         with sp1:
-            shot_bucket_options = ["All"] + [b for b in APPROACH_BUCKET_ORDER if b in shot_base["Approach Bucket"].dropna().astype(str).tolist()]
-            shot_bucket = st.selectbox("Distance Bucket Filter", shot_bucket_options, key="shot_bucket_filter")
+            shot_bucket_options = [b for b in APPROACH_BUCKET_ORDER if b in shot_options_base["Approach Bucket"].dropna().astype(str).tolist()]
+            shot_buckets = st.multiselect("Distance Bucket Filter", shot_bucket_options, default=[], key="shot_bucket_filter_multi")
         with sp2:
-            club_vals = sorted([c for c in shot_base["Approach Club"].dropna().unique().tolist() if str(c).strip() != ""])
-            shot_club = st.selectbox("Club Filter", ["All"] + club_vals, key="shot_club_filter")
+            club_vals = sorted([c for c in shot_options_base["Approach Club"].dropna().unique().tolist() if str(c).strip() != ""])
+            shot_clubs = st.multiselect("Club Filter", club_vals, default=[], key="shot_club_filter_multi")
         with sp3:
-            course_vals = sorted([c for c in shot_base["Course Name"].dropna().unique().tolist()]) if "Course Name" in shot_base else []
-            shot_course = st.selectbox("Course Filter", ["All"] + course_vals, key="shot_course_filter")
+            course_vals = sorted([c for c in shot_options_base["Course Name"].dropna().unique().tolist()]) if "Course Name" in shot_options_base else []
+            shot_courses = st.multiselect("Course Filter", course_vals, default=[], key="shot_course_filter_multi")
 
-        shot_view = shot_base.copy()
-        if shot_bucket != "All":
-            shot_view = shot_view[shot_view["Approach Bucket"].astype(str) == shot_bucket]
-        if shot_club != "All":
-            shot_view = shot_view[shot_view["Approach Club"] == shot_club]
-        if shot_course != "All":
-            shot_view = shot_view[shot_view["Course Name"] == shot_course]
+        sp4, sp5 = st.columns(2)
+        with sp4:
+            fairway_labels = {1: "Fairway Hit", 0: "Fairway Miss"}
+            shot_fairway_labels = st.multiselect("Fairway Filter", list(fairway_labels.values()), default=[], key="shot_fairway_filter_multi")
+            shot_fairway_vals = [k for k, v in fairway_labels.items() if v in shot_fairway_labels]
+        with sp5:
+            shot_pars = st.multiselect("Hole Par Filter", [3,4,5], default=[], key="shot_par_filter_multi")
 
-        if not shot_view.empty:
-            shot_attempts = len(shot_view)
-            shot_gir = int(shot_view["Approach GIR Flag"].sum())
-            shot_pct = shot_gir / shot_attempts * 100 if shot_attempts else 0
-            shot_prox = float(shot_view["Approach Proximity"].mean()) if shot_attempts else 0.0
-            a1, a2, a3 = st.columns(3)
+        round_shot_view = apply_approach_filters(
+            round_data,
+            yard_buckets=shot_buckets,
+            clubs=shot_clubs,
+            courses=shot_courses,
+            fairway_vals=shot_fairway_vals,
+            par_vals=shot_pars,
+        )
+        bench_shot_view = apply_approach_filters(
+            benchmark_df,
+            yard_buckets=shot_buckets,
+            clubs=shot_clubs,
+            courses=shot_courses,
+            fairway_vals=shot_fairway_vals,
+            par_vals=shot_pars,
+        )
+
+        if not round_shot_view.empty or not bench_shot_view.empty:
+            shot_metrics = build_filtered_approach_metrics(round_shot_view)
+            shot_bench_metrics = build_filtered_approach_metrics(bench_shot_view)
+            a1, a2, a3, a4 = st.columns(4)
             with a1:
-                st.metric("Filtered Attempts", shot_attempts)
+                st.metric("Filtered Attempts", shot_metrics["attempts"], f'{shot_metrics["attempts"] - shot_bench_metrics["attempts"]:+d}')
             with a2:
-                st.metric("Filtered GIR", f"{shot_gir}/{shot_attempts}", f"{shot_pct:.1f}%")
+                st.metric("Filtered GIR", f'{shot_metrics["gir"]}/{shot_metrics["attempts"]}', f'{shot_metrics["gir_pct"] - shot_bench_metrics["gir_pct"]:+.1f}%')
             with a3:
-                st.metric("Avg Proximity", f"{shot_prox:.1f} ft")
+                st.metric("Avg Proximity", f'{shot_metrics["avg_prox"]:.1f} ft', f'{shot_bench_metrics["avg_prox"] - shot_metrics["avg_prox"]:+.1f} ft')
+            with a4:
+                st.metric("Inside 15 ft", f'{shot_metrics["inside15"]}/{shot_metrics["attempts"]}', f'{shot_metrics["inside15_pct"] - shot_bench_metrics["inside15_pct"]:+.1f}%')
 
-            shot_summary = (
-                shot_view.groupby(["Approach Bucket"], as_index=False)
+            round_shot_summary = (
+                round_shot_view.groupby(["Approach Bucket"], as_index=False)
                 .agg(Attempts=("Approach GIR Flag", "size"), Made=("Approach GIR Flag", "sum"), AvgProx=("Approach Proximity", "mean"))
                 .rename(columns={"Approach Bucket": "Bucket"})
-            )
-            shot_summary["Pct"] = (shot_summary["Made"] / shot_summary["Attempts"] * 100).round(1)
-            shot_summary["Label"] = shot_summary.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {r['Pct']:.1f}%", axis=1)
+            ) if not round_shot_view.empty else pd.DataFrame(columns=["Bucket","Attempts","Made","AvgProx"])
+            if not round_shot_summary.empty:
+                round_shot_summary["Pct"] = (round_shot_summary["Made"] / round_shot_summary["Attempts"] * 100).round(1)
+                round_shot_summary["Label"] = round_shot_summary.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
 
-            dash = alt.Chart(shot_summary).mark_bar().encode(
-                y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER, title="Bucket"),
-                x=alt.X("Pct:Q", title="GIR %"),
-                tooltip=[alt.Tooltip("Bucket:N"), alt.Tooltip("Attempts:Q"), alt.Tooltip("Made:Q"), alt.Tooltip("Pct:Q", format=".1f"), alt.Tooltip("AvgProx:Q", format=".1f")]
-            ).properties(height=max(220, len(shot_summary) * 28))
-            labels = alt.Chart(shot_summary).mark_text(align="left", dx=6).encode(y=alt.Y("Bucket:N", sort=APPROACH_BUCKET_ORDER), x="Pct:Q", text="Label:N")
-            st.altair_chart(dash + labels, use_container_width=True)
+            bench_shot_summary = (
+                bench_shot_view.groupby(["Approach Bucket"], as_index=False)
+                .agg(Attempts=("Approach GIR Flag", "size"), Made=("Approach GIR Flag", "sum"), AvgProx=("Approach Proximity", "mean"))
+                .rename(columns={"Approach Bucket": "Bucket"})
+            ) if not bench_shot_view.empty else pd.DataFrame(columns=["Bucket","Attempts","Made","AvgProx"])
+            if not bench_shot_summary.empty:
+                bench_shot_summary["Pct"] = (bench_shot_summary["Made"] / bench_shot_summary["Attempts"] * 100).round(1)
+                bench_shot_summary["Label"] = bench_shot_summary.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
+
+            shot_long = build_compare_long(round_shot_summary, bench_shot_summary, "Bucket", round_label="Round", bench_label=compare_mode)
+            if not shot_long.empty:
+                render_paired_compare_bars(shot_long, "Bucket", APPROACH_BUCKET_ORDER, compare_mode, "Distance Bucket", "GIR %")
+            else:
+                st.info("No shot pattern comparison bars available.")
+
+            st.markdown("##### Shot Pattern Dispersion")
+            render_dispersion_panel(round_shot_view, title="Filtered Shot Pattern Dispersion")
+
             st.dataframe(
-                shot_view.sort_values(["Date Played", "Hole"], ascending=[False, True])[[
+                round_shot_view.sort_values(["Date Played", "Hole"], ascending=[False, True])[[
                     "Date Played", "Course Name", "Hole", "Approach Club", "Approach Distance", "Approach Bucket", "Approach GIR Flag", "Approach Miss Direction Clean", "Approach Proximity"
                 ]].rename(columns={
                     "Approach Club": "Club",
@@ -2245,16 +3461,58 @@ with tab_putting:
     with c1:
         st.metric("Round Putt Attempts", round_attempts)
     with c2:
-        st.metric("Round Makes", f"{round_made}/{round_attempts}", f"{round_pct:.1f}%")
+        st.metric("Round 1-Putts", f"{round_made}/{round_attempts}", f"{round_pct:.1f}%")
     with c3:
         st.metric(f"{compare_mode_putt} Attempts", bench_attempts)
     with c4:
-        st.metric(f"{compare_mode_putt} Makes", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
+        st.metric(f"{compare_mode_putt} 1-Putts", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
 
-    st.markdown("#### Putts by Starting Distance")
+    putt_impact = build_putting_round_impact(round_data, benchmark_df_putt)
+    total_putts_round = int(pd.to_numeric(_safe_col(round_data, "Putts", 0), errors="coerce").fillna(0).sum())
+    three_putts_round = int((pd.to_numeric(_safe_col(round_data, "Putts", 0), errors="coerce").fillna(0) >= 3).sum())
+    sg_color = "#64dfb5" if putt_impact["sg_putting"] >= 0 else "#ee6c4d"
+
+    st.markdown(
+        f"""
+        <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
+          <b>🧾 Putting Round Summary</b><br>
+          Total Putts: {total_putts_round}<br>
+          1-Putts: {putt_impact['made']}/{putt_impact['attempts']} ({putt_impact['pct']:.1f}%)<br>
+          3-Putts: {three_putts_round}<br>
+          Putting SG vs {compare_mode_putt}: <span style="font-weight:800; color:{sg_color};">{putt_impact['sg_putting']:+.2f}</span>
+          <span style="color:#aaa;">(Expected Makes: {putt_impact['expected_makes']:.1f} | Actual Makes: {putt_impact['actual_makes']:.0f})</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Putts by Starting Distance (1-Putt %)")
     round_putt_bucket = summarize_putting_by_bucket(round_data)
     bench_putt_bucket = summarize_putting_by_bucket(benchmark_df_putt)
-    render_bucket_compare_tab(round_putt_bucket, bench_putt_bucket, "Bucket", PUTT_BUCKET_ORDER, compare_mode_putt, "Putt Range", "Make %")
+
+    putt_long = build_compare_long(round_putt_bucket, bench_putt_bucket, "Bucket", round_label="Round", bench_label=compare_mode_putt)
+    if not putt_long.empty:
+        render_paired_compare_bars(putt_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode_putt, "Putt Range", "1-Putt %")
+
+        putt_table = pd.merge(
+            round_putt_bucket.rename(columns={"Attempts": "Round Attempts", "Made": "Round 1-Putts", "Pct": "Round 1-Putt %"}),
+            bench_putt_bucket.rename(columns={"Attempts": f"{compare_mode_putt} Attempts", "Made": f"{compare_mode_putt} 1-Putts", "Pct": f"{compare_mode_putt} 1-Putt %"}),
+            on="Bucket",
+            how="outer"
+        ).sort_values("Bucket")
+        st.dataframe(putt_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("No usable putting bucket data found for this round / comparison group.")
+
+    with st.expander("🔎 Debug: Putting SG vs Baseline", expanded=False):
+        st.write({
+            "compare_mode": compare_mode_putt,
+            "attempts": putt_impact["attempts"],
+            "actual_makes": round(putt_impact["actual_makes"], 3),
+            "expected_makes": round(putt_impact["expected_makes"], 3),
+            "extra_makes": round(putt_impact["extra_makes"], 3),
+            "sg_putting": round(putt_impact["sg_putting"], 3),
+        })
 
     putting_debug = prepare_putting_frame(round_data).copy()
     if not putting_debug.empty:
@@ -2264,7 +3522,7 @@ with tab_putting:
             "First Putt Distance": "Start Ft",
             "Putt Bucket": "Bucket",
             "Putt Made Feet": "Made Ft",
-            "Putt Made Flag": "Made Flag",
+            "Putt Made Flag": "1-Putt Flag",
             "Putts Clean": "Putts"
         })
     render_debug_section("🔎 Debug: Putting rows used in calculations", putting_debug)
@@ -2294,10 +3552,82 @@ with tab_shortgame:
     with c4:
         st.metric(f"{compare_mode_sg} 1-Putt Saves", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
 
+    sg_extra = build_short_game_extra_stats(round_data)
+    sg_bench = build_short_game_extra_stats(benchmark_df_sg) if "benchmark_df_sg" in locals() else {"holes_2plus":0,"opportunities":0}
+
+    round_2plus_pct = (sg_extra["holes_2plus"] / sg_extra["opportunities"]) if sg_extra["opportunities"] else 0
+    bench_2plus_pct = (sg_bench["holes_2plus"] / sg_bench["opportunities"]) if sg_bench["opportunities"] else 0
+    delta_2plus = (round_2plus_pct - bench_2plus_pct) * 100
+
+    updowns_made = int(pd.to_numeric(_safe_col(round_data, "Up and Down", 0), errors="coerce").fillna(0).sum()) if "Up and Down" in round_data else int(pd.to_numeric(_safe_col(round_data, "Up & Down", 0), errors="coerce").fillna(0).sum()) if "Up & Down" in round_data else 0
+    updowns_ops = int(pd.to_numeric(_safe_col(round_data, "Up and Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up and Down Opportunity" in round_data else int(pd.to_numeric(_safe_col(round_data, "Up & Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up & Down Opportunity" in round_data else round_attempts
+    updowns_pct = (updowns_made / updowns_ops * 100.0) if updowns_ops else 0.0
+    bench_updowns_made = int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up and Down", 0), errors="coerce").fillna(0).sum()) if "Up and Down" in benchmark_df_sg else int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up & Down", 0), errors="coerce").fillna(0).sum()) if "Up & Down" in benchmark_df_sg else 0
+    bench_updowns_ops = int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up and Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up and Down Opportunity" in benchmark_df_sg else int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up & Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up & Down Opportunity" in benchmark_df_sg else bench_attempts
+    bench_updowns_pct = (bench_updowns_made / bench_updowns_ops * 100.0) if bench_updowns_ops else 0.0
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        st.metric("Total Chips", sg_extra["total_chips"])
+    with c6:
+        st.metric(
+            "Chips / Holes Available",
+            f'{sg_extra["total_chips"]}/{sg_extra["opportunities"]}',
+            f'{sg_extra["chips_per_hole"]:.1f}'
+        )
+    with c7:
+        st.metric(
+            "Holes w/ 2+ Chips",
+            f'{sg_extra["holes_2plus"]}/{sg_extra["opportunities"]} ({round_2plus_pct*100:.1f}%)',
+            f'{-delta_2plus:+.1f}% vs avg'
+        )
+    with c8:
+        st.metric(
+            "Up & Down %",
+            f"{updowns_made}/{updowns_ops} ({updowns_pct:.1f}%)",
+            f"{(updowns_pct - bench_updowns_pct):+.1f}% vs avg"
+        )
+
+    st.markdown("#### Chipping Inside Leave Distances")
+    chip_inside_df = build_short_game_inside_range_summary(round_data, benchmark_df_sg)
+    if not chip_inside_df.empty:
+        chip_long = pd.DataFrame({
+            "Bucket": list(chip_inside_df["Bucket"].astype(str)) * 2,
+            "Series": ["Round"] * len(chip_inside_df) + [compare_mode_sg] * len(chip_inside_df),
+            "Made": list(pd.to_numeric(chip_inside_df["Round Inside"], errors="coerce").fillna(0).astype(int))
+                    + list(pd.to_numeric(chip_inside_df["Baseline Inside"], errors="coerce").fillna(0).astype(int)),
+            "Attempts": list(pd.to_numeric(chip_inside_df["Round Opportunities"], errors="coerce").fillna(0).astype(int))
+                        + list(pd.to_numeric(chip_inside_df["Baseline Opportunities"], errors="coerce").fillna(0).astype(int)),
+            "Pct": list(pd.to_numeric(chip_inside_df["Round %"], errors="coerce").fillna(0.0))
+                   + list(pd.to_numeric(chip_inside_df["Baseline %"], errors="coerce").fillna(0.0)),
+            "Label": list(chip_inside_df["DisplayLabel"])
+                     + [
+                        f"{_safe_int_scalar(r.get('Baseline Inside', 0))}/{_safe_int_scalar(r.get('Baseline Opportunities', 0))} {_safe_float_scalar(r.get('Baseline %', 0)):.0f}%"
+                        for _, r in chip_inside_df.iterrows()
+                     ],
+        })
+        render_paired_compare_bars(chip_long, "Bucket", SHORT_GAME_BUCKET_ORDER, compare_mode_sg, "Leave Distance", "Chip-Inside %")
+        st.dataframe(chip_inside_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No chip-inside leave-distance data found for this round / comparison group.")
+
     st.markdown("#### Short Game Leave Distance → 1-Putt %")
     round_sg_bucket = summarize_short_game_by_bucket(round_data)
     bench_sg_bucket = summarize_short_game_by_bucket(benchmark_df_sg)
-    render_bucket_compare_tab(round_sg_bucket, bench_sg_bucket, "Bucket", SHORT_GAME_BUCKET_ORDER, compare_mode_sg, "Leave Distance", "1-Putt %")
+
+    sg_long = build_compare_long(round_sg_bucket, bench_sg_bucket, "Bucket", round_label="Round", bench_label=compare_mode_sg)
+    if not sg_long.empty:
+        render_paired_compare_bars(sg_long, "Bucket", SHORT_GAME_BUCKET_ORDER, compare_mode_sg, "Leave Distance", "1-Putt %")
+
+        sg_table = pd.merge(
+            round_sg_bucket.rename(columns={"Attempts": "Round Attempts", "Made": "Round 1-Putt Saves", "Pct": "Round 1-Putt %"}),
+            bench_sg_bucket.rename(columns={"Attempts": f"{compare_mode_sg} Attempts", "Made": f"{compare_mode_sg} 1-Putt Saves", "Pct": f"{compare_mode_sg} 1-Putt %"}),
+            on="Bucket",
+            how="outer"
+        ).sort_values("Bucket")
+        st.dataframe(sg_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("No usable short game bucket data found for this round / comparison group.")
 
     short_game_debug = prepare_short_game_frame(round_data).copy()
     if not short_game_debug.empty:
