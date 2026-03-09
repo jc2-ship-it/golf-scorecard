@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import datetime
 import altair as alt
+import numpy as np
 import os, json, random
 import re
 from pathlib import Path
@@ -1575,35 +1576,10 @@ def render_distance_performance_curve(round_curve, bench_curve=None, compare_lab
 
 
 def render_dispersion_panel(frame, title="Approach Dispersion"):
-    d = prepare_approach_frame(frame).copy()
-    if d.empty:
+    pts = _build_dispersion_points(frame)
+    if pts.empty:
         st.info("No approach dispersion data available.")
         return
-
-    vectors = {
-        "Short Left": (-0.7, -0.7),
-        "Left": (-1.0, 0.0),
-        "Long Left": (-0.7, 0.7),
-        "Short": (0.0, -1.0),
-        "Long": (0.0, 1.0),
-        "Short Right": (0.7, -0.7),
-        "Right": (1.0, 0.0),
-        "Long Right": (0.7, 0.7),
-    }
-
-    def _xy(row):
-        prox = float(row.get("Approach Proximity", 0) or 0)
-        if prox <= 0:
-            prox = 5.0
-        direction = row.get("Approach Miss Direction Clean", "")
-        if direction in vectors:
-            vx, vy = vectors[direction]
-            return pd.Series({"x": vx * prox, "y": vy * prox})
-        # center GIR / no-direction shots
-        return pd.Series({"x": 0.0, "y": 0.0})
-
-    pts = d.join(d.apply(_xy, axis=1))
-    pts["Hole"] = _int(_safe_col(pts, "Hole", 0))
 
     zero_h = alt.Chart(pd.DataFrame({"y":[0]})).mark_rule(opacity=0.25).encode(y="y:Q")
     zero_v = alt.Chart(pd.DataFrame({"x":[0]})).mark_rule(opacity=0.25).encode(x="x:Q")
@@ -1632,7 +1608,19 @@ def render_dispersion_panel(frame, title="Approach Dispersion"):
         x="x:Q", y="y:Q", tooltip=[alt.Tooltip("Label:N")]
     )
 
-    st.altair_chart((zero_h + zero_v + scatter + hole).configure_view(stroke=None), use_container_width=True)
+    ellipse_df = build_dispersion_ellipse_df(frame)
+    ellipse_layer = alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_line()
+    if not ellipse_df.empty:
+        ellipse_layer = (
+            alt.Chart(ellipse_df)
+            .mark_line(strokeWidth=3, color="#f5c518", opacity=0.95)
+            .encode(x="x:Q", y="y:Q")
+        )
+
+    st.altair_chart((zero_h + zero_v + scatter + hole + ellipse_layer).configure_view(stroke=None), use_container_width=True)
+
+    if not ellipse_df.empty:
+        st.caption("Yellow ellipse shows the overall shot-spread pattern for this filtered set of approach shots.")
 
 
 
@@ -2218,6 +2206,177 @@ def render_club_performance_curve(round_club, bench_club=None, compare_label="Ba
     """
     components.html(svg, height=height + 8, scrolling=False)
 
+
+
+
+APPROACH_CLUB_DISPLAY_ORDER = [
+    "LW", "SW", "GW", "AW", "PW",
+    "9 Iron", "8 Iron", "7 Iron", "6 Iron", "5 Iron", "4 Iron", "3 Iron", "2 Iron", "1 Iron",
+    "HY", "2H", "3H", "4H", "5H", "6H", "7H",
+    "7W", "5W", "4W", "3W", "2W", "1W", "DRIVER"
+]
+
+def _club_display_sort_key(club):
+    c = str(club).strip()
+    if c in APPROACH_CLUB_DISPLAY_ORDER:
+        return APPROACH_CLUB_DISPLAY_ORDER.index(c)
+    return len(APPROACH_CLUB_DISPLAY_ORDER) + 100
+
+def build_distance_club_compare_matrix(round_frame, bench_frame, min_attempts=1):
+    round_heat = build_distance_club_heatmap(round_frame)
+    bench_heat = build_distance_club_heatmap(bench_frame)
+
+    merged = pd.merge(
+        round_heat.rename(columns={
+            "Attempts": "Round Attempts",
+            "Made": "Round Made",
+            "Pct": "Round Pct",
+            "AvgProx": "Round Avg Prox"
+        }),
+        bench_heat.rename(columns={
+            "Attempts": "Bench Attempts",
+            "Made": "Bench Made",
+            "Pct": "Bench Pct",
+            "AvgProx": "Bench Avg Prox"
+        }),
+        on=["Bucket", "Club"],
+        how="outer"
+    )
+
+    if merged.empty:
+        return merged
+
+    for col in ["Round Attempts", "Round Made", "Round Pct", "Round Avg Prox", "Bench Attempts", "Bench Made", "Bench Pct", "Bench Avg Prox"]:
+        merged[col] = pd.to_numeric(merged.get(col), errors="coerce")
+
+    fill_zero_cols = ["Round Attempts", "Round Made", "Round Pct", "Bench Attempts", "Bench Made", "Bench Pct"]
+    merged[fill_zero_cols] = merged[fill_zero_cols].fillna(0)
+
+    merged = merged[
+        (merged["Round Attempts"] >= min_attempts) | (merged["Bench Attempts"] >= min_attempts)
+    ].copy()
+
+    if merged.empty:
+        return merged
+
+    merged["Delta"] = (merged["Round Pct"] - merged["Bench Pct"]).round(1)
+    merged["CellLabel"] = merged.apply(
+        lambda r: f"{int(r['Round Made'])}/{int(r['Round Attempts'])} {r['Round Pct']:.0f}%\nvs {r['Bench Pct']:.0f}%",
+        axis=1
+    )
+    merged["Bucket"] = pd.Categorical(merged["Bucket"], categories=APPROACH_BUCKET_ORDER, ordered=True)
+    merged["_club_sort"] = merged["Club"].astype(str).apply(_club_display_sort_key)
+    return merged.sort_values(["Bucket", "_club_sort", "Club"]).reset_index(drop=True)
+
+def render_distance_club_compare_matrix(round_frame, bench_frame, compare_label="Baseline", min_attempts=1):
+    heat = build_distance_club_compare_matrix(round_frame, bench_frame, min_attempts=min_attempts)
+    if heat.empty:
+        st.info("No usable distance × club rows available for the comparison matrix.")
+        return
+
+    club_order = heat[["Club", "_club_sort"]].drop_duplicates().sort_values(["_club_sort", "Club"])["Club"].tolist()
+    bucket_order = [b for b in APPROACH_BUCKET_ORDER if b in heat["Bucket"].astype(str).tolist()]
+
+    rect = (
+        alt.Chart(heat)
+        .mark_rect(stroke="#666", cornerRadius=8)
+        .encode(
+            x=alt.X("Club:N", sort=club_order, title="Club"),
+            y=alt.Y("Bucket:N", sort=bucket_order, title="Distance Bucket"),
+            color=alt.Color("Delta:Q", title="Round vs Baseline Δ", scale=alt.Scale(scheme="redyellowgreen")),
+            tooltip=[
+                alt.Tooltip("Bucket:N"),
+                alt.Tooltip("Club:N"),
+                alt.Tooltip("Round Attempts:Q"),
+                alt.Tooltip("Round Made:Q"),
+                alt.Tooltip("Round Pct:Q", format=".1f", title="Round GIR %"),
+                alt.Tooltip("Bench Attempts:Q", title=f"{compare_label} Attempts"),
+                alt.Tooltip("Bench Made:Q", title=f"{compare_label} Made"),
+                alt.Tooltip("Bench Pct:Q", format=".1f", title=f"{compare_label} GIR %"),
+                alt.Tooltip("Delta:Q", format="+.1f", title="Δ"),
+            ]
+        )
+    )
+
+    text = (
+        alt.Chart(heat)
+        .mark_text(fontSize=10, fontWeight="bold")
+        .encode(
+            x=alt.X("Club:N", sort=club_order),
+            y=alt.Y("Bucket:N", sort=bucket_order),
+            text="CellLabel:N",
+            color=alt.condition("abs(datum.Delta) < 8", alt.value("black"), alt.value("white"))
+        )
+    )
+
+    st.altair_chart(
+        (rect + text)
+        .properties(height=max(320, len(bucket_order) * 28), title=f"Distance × Club Matrix — Round vs {compare_label}")
+        .configure_view(stroke=None),
+        use_container_width=True
+    )
+
+    matrix_table = heat[[
+        "Bucket", "Club", "Round Attempts", "Round Made", "Round Pct", "Bench Attempts", "Bench Made", "Bench Pct", "Delta"
+    ]].copy()
+    st.dataframe(matrix_table, use_container_width=True, hide_index=True)
+
+def _build_dispersion_points(frame):
+    d = prepare_approach_frame(frame).copy()
+    if d.empty:
+        return pd.DataFrame()
+
+    vectors = {
+        "Short Left": (-0.7, -0.7),
+        "Left": (-1.0, 0.0),
+        "Long Left": (-0.7, 0.7),
+        "Short": (0.0, -1.0),
+        "Long": (0.0, 1.0),
+        "Short Right": (0.7, -0.7),
+        "Right": (1.0, 0.0),
+        "Long Right": (0.7, 0.7),
+    }
+
+    def _xy(row):
+        prox = float(row.get("Approach Proximity", 0) or 0)
+        if prox <= 0:
+            prox = 5.0
+        direction = row.get("Approach Miss Direction Clean", "")
+        if direction in vectors:
+            vx, vy = vectors[direction]
+            return pd.Series({"x": vx * prox, "y": vy * prox})
+        return pd.Series({"x": 0.0, "y": 0.0})
+
+    pts = d.join(d.apply(_xy, axis=1))
+    pts["Hole"] = _int(_safe_col(pts, "Hole", 0))
+    return pts
+
+def build_dispersion_ellipse_df(frame, n_std=1.5, n_points=120):
+    pts = _build_dispersion_points(frame)
+    if pts.empty or len(pts) < 3:
+        return pd.DataFrame(columns=["x", "y"])
+
+    arr = pts[["x", "y"]].dropna().to_numpy(dtype=float)
+    if arr.shape[0] < 3:
+        return pd.DataFrame(columns=["x", "y"])
+
+    center = arr.mean(axis=0)
+    cov = np.cov(arr, rowvar=False)
+    if np.isnan(cov).any():
+        return pd.DataFrame(columns=["x", "y"])
+
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.clip(vals, 0, None)
+    order = vals.argsort()[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+
+    theta = np.linspace(0, 2 * np.pi, n_points)
+    circle = np.vstack([np.cos(theta), np.sin(theta)])
+    scale = n_std * np.sqrt(vals)
+    ellipse = (vecs @ np.diag(scale) @ circle).T + center
+
+    return pd.DataFrame({"x": ellipse[:, 0], "y": ellipse[:, 1]})
 
 # =========================================================
 # Load + base prep
@@ -3158,6 +3317,9 @@ with tab_approach:
 
     st.markdown("#### Approach Dispersion Plot")
     render_dispersion_panel(round_data, title="Round Approach Dispersion")
+
+    st.markdown("#### Distance × Club Matrix")
+    render_distance_club_compare_matrix(round_data, benchmark_df, compare_label=compare_mode, min_attempts=1)
 
     st.markdown("#### Approach GIR by Club")
     min_club_attempts = st.slider("Minimum attempts for club chart (applies to round and comparison display)", 1, 10, 1, 1)
