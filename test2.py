@@ -1,8 +1,11 @@
 
 import io
 import math
+import random
 import re
 from pathlib import Path
+
+from datetime import datetime
 
 import altair as alt
 import numpy as np
@@ -58,6 +61,90 @@ AUTO_FILE_CANDIDATES = [
     "Launch .csv",
     "launch.csv",
     "launch_data.csv",
+]
+MASTER_OUTPUT_FILE = "Launch.csv"
+
+TRIVIA_FACTS = [
+    ("Baseball", "Cy Young won 511 games, a record that is almost certainly untouchable in the modern era."),
+    ("Baseball", "Walter Johnson threw 110 career shutouts, still one of the most staggering pitching totals ever."),
+    ("Baseball", "Babe Ruth once hit 60 home runs in 1927, more than every team in the American League except one."),
+    ("Baseball", "Lou Gehrig played 2,130 straight games before his streak ended in 1939."),
+    ("Baseball", "Joe DiMaggio's 56-game hitting streak in 1941 still stands as the major league record."),
+    ("Baseball", "Ted Williams finished his career with a .344 batting average and reached base in over 48% of his plate appearances."),
+    ("Baseball", "Stan Musial had exactly 1,815 hits at home and 1,815 hits on the road."),
+    ("Baseball", "Willie Mays combined elite power, speed, and defense so completely that many historians call him the greatest all-around player ever."),
+    ("Baseball", "Hank Aaron hit 755 home runs and also collected more than 3,700 hits."),
+    ("Baseball", "Bob Gibson posted a 1.12 ERA in 1968, one of the greatest pitching seasons in MLB history."),
+    ("Baseball", "Sandy Koufax threw four no-hitters in four seasons and won three Cy Young Awards in a row."),
+    ("Baseball", "Roberto Clemente recorded exactly 3,000 hits, with his final hit becoming a perfect round-number milestone."),
+    ("Baseball", "Mickey Mantle hit 18 World Series home runs, still the record."),
+    ("Baseball", "Ty Cobb finished with a .366 career batting average, the highest in modern major league history."),
+    ("Baseball", "Honus Wagner's tobacco card became one of the most famous and valuable sports cards in the world."),
+    ("Baseball", "Christy Mathewson won 373 games and threw three shutouts in the 1905 World Series."),
+    ("Baseball", "Lefty Grove led the American League in ERA nine times."),
+    ("Baseball", "Yogi Berra played on 10 World Series champions with the Yankees."),
+    ("Baseball", "Jackie Robinson won Rookie of the Year, an MVP, and changed the sport forever after breaking MLB's color barrier."),
+    ("Baseball", "Brooks Robinson won 16 straight Gold Gloves at third base."),
+    ("Baseball", "Tom Seaver struck out 10 straight Padres in 1970, tying a major league record."),
+    ("Baseball", "Nolan Ryan recorded 5,714 strikeouts, the highest total in MLB history."),
+    ("Baseball", "Reggie Jackson hit three home runs on three consecutive swings in Game 6 of the 1977 World Series."),
+    ("Notre Dame", "Knute Rockne coached Notre Dame to 105 wins and helped popularize the forward pass."),
+    ("Notre Dame", "The Four Horsemen backfield of 1924 became one of the most famous nicknames in sports history."),
+    ("Notre Dame", "George Gipp inspired the immortal phrase 'Win one for the Gipper.'"),
+    ("Notre Dame", "Ara Parseghian led Notre Dame to national titles in 1966 and 1973."),
+    ("Notre Dame", "Dan Devine coached Notre Dame to the 1977 national championship."),
+    ("Notre Dame", "Lou Holtz guided Notre Dame to the 1988 national championship and a 12-0 season."),
+    ("Notre Dame", "The Fighting Irish have produced seven Heisman Trophy winners, one of the highest totals in college football."),
+    ("Notre Dame", "The 1973 Sugar Bowl win over Alabama remains one of Notre Dame's most celebrated title-clinching performances."),
+    ("Notre Dame", "Tim Brown won the 1987 Heisman Trophy primarily as a wide receiver and return specialist, a rare combination."),
+    ("Notre Dame", "The phrase 'Play Like a Champion Today' became an iconic Notre Dame tunnel tradition."),
+    ("Wrestling", "Dan Gable finished his college career at Iowa State with a 117-1 record."),
+    ("Wrestling", "Dan Gable then won Olympic gold in 1972 without surrendering a single point."),
+    ("Wrestling", "Cael Sanderson went 159-0 in college, the only four-time undefeated NCAA Division I champion."),
+    ("Wrestling", "Iowa under Dan Gable won 15 NCAA team titles in a 21-year span."),
+    ("Wrestling", "John Smith won two Olympic gold medals and four World titles in freestyle wrestling."),
+    ("Wrestling", "Bruce Baumgartner became one of America's greatest heavyweights with multiple Olympic medals and world titles."),
+    ("Wrestling", "Kurt Angle won Olympic gold in 1996 despite competing with a severely injured neck."),
+    ("Wrestling", "Aleksandr Karelin went nearly 13 years without losing an international match."),
+    ("Wrestling", "Jordan Burroughs won an Olympic gold medal and multiple world titles with one of the sport's most explosive double legs."),
+    ("Wrestling", "Kyle Snyder became one of the youngest American Olympic wrestling champions ever when he won gold in 2016."),
+    ("Olympics", "Jesse Owens won four gold medals at the 1936 Berlin Olympics."),
+    ("Olympics", "Nadia Comaneci scored the first perfect 10 in Olympic gymnastics in 1976."),
+    ("Olympics", "Michael Phelps won 23 Olympic gold medals, the most by any athlete."),
+    ("Olympics", "Usain Bolt swept the 100m and 200m at three straight Olympics from 2008 through 2016."),
+    ("Olympics", "Eric Heiden won five gold medals in five speed skating events at the 1980 Winter Olympics."),
+    ("Golf", "Jack Nicklaus won 18 professional major championships, still the men's record."),
+    ("Golf", "Tiger Woods won the 2000 U.S. Open by 15 shots, the largest margin in major championship history."),
+    ("Golf", "Ben Hogan returned from a near-fatal car crash and still won six majors afterward."),
+    ("Golf", "Arnold Palmer's charge at the 1960 U.S. Open helped define modern televised golf drama."),
+    ("Golf", "Gary Player became one of the first global golf superstars and completed the career Grand Slam."),
+    ("Golf", "Bobby Jones won the Grand Slam in 1930, before the modern professional major structure existed."),
+    ("Golf", "Tom Watson won five Open Championships and nearly won another at age 59 in 2009."),
+    ("Golf", "Phil Mickelson became the oldest major champion when he won the 2021 PGA Championship at age 50."),
+    ("Golf", "Nick Faldo won six majors and was known for major-week precision and discipline."),
+    ("Golf", "Padraig Harrington won back-to-back Open Championships in 2007 and 2008."),
+    ("Golf", "Seve Ballesteros brought imagination and recovery artistry to major championship golf like few players ever have."),
+    ("Golf", "Jordan Spieth nearly completed the Grand Slam by age 24 and won the 2015 Masters by tying the scoring record."),
+    ("Golf", "Brooks Koepka won four majors in just eight starts across the U.S. Open and PGA Championship from 2017 to 2019."),
+    ("Golf", "Annika Sorenstam won 10 majors and once shot 59 in competition."),
+    ("Golf", "Mickey Wright's swing was praised by Ben Hogan as one of the best he had ever seen."),
+    ("Golf", "Patty Berg won 15 majors, still the all-time LPGA record."),
+    ("Movies", "Katharine Hepburn won four Academy Awards for acting, more than any other performer."),
+    ("Movies", "Meryl Streep has received more Oscar acting nominations than any other performer."),
+    ("Movies", "The Godfather, Casablanca, and Lawrence of Arabia are frequent fixtures on greatest-film lists."),
+    ("Movies", "Ben-Hur, Titanic, and The Lord of the Rings: The Return of the King each won 11 Oscars."),
+    ("Movies", "Citizen Kane is often cited as one of the most influential films ever made."),
+    ("Movies", "2001: A Space Odyssey reshaped science-fiction filmmaking with its scale, visuals, and ambition."),
+    ("Movies", "Blade Runner became more influential over time and helped define the look of cinematic cyberpunk."),
+    ("Movies", "The Empire Strikes Back was initially just a sequel, but it grew into one of the most acclaimed blockbusters ever."),
+    ("Movies", "Alien blended science fiction and horror so effectively that it launched one of film's great franchises."),
+    ("Movies", "Jaws is often credited with helping invent the modern summer blockbuster."),
+    ("Movies", "Schindler's List won Best Picture and remains one of Steven Spielberg's most acclaimed films."),
+    ("Movies", "No Country for Old Men won Best Picture and is celebrated for its tension, restraint, and unforgettable villain."),
+    ("Movies", "Everything Everywhere All at Once swept the 2023 Oscars with seven wins including Best Picture."),
+    ("Movies", "The Silence of the Lambs won the 'Big Five' Oscars: Picture, Director, Actor, Actress, and Screenplay."),
+    ("Movies", "Mad Max: Fury Road won six Oscars and became one of the most acclaimed action films of the 21st century."),
+    ("Movies", "Parasite became the first non-English-language film to win Best Picture at the Oscars."),
 ]
 
 # Illustrative benchmark baselines for comparison mode.
@@ -669,6 +756,430 @@ def benchmark_reason(row, benchmark_name):
         return f"Not enough data to compare to {benchmark_name.lower()}."
     return "; ".join(bits[:3]).capitalize() + "."
 
+
+def overall_session_score(club_summary):
+    if club_summary.empty:
+        return np.nan
+    vals = (
+        club_summary["Consistency"].fillna(club_summary["Consistency"].median()) * 0.55
+        + np.clip(10 - club_summary["AvgOffline"].abs().fillna(0) * 0.35, 1, 10) * 0.20
+        + np.clip(10 - club_summary["CarryStd"].fillna(club_summary["CarryStd"].median()) * 0.28, 1, 10) * 0.25
+    )
+    return float(np.clip(vals.mean(), 1, 10))
+
+
+def gap_table(club_summary):
+    g = club_summary.sort_values(["Club Sort", "Club"]).copy()
+    g["Next Club"] = g["Club"].shift(-1)
+    g["Gap To Next"] = g["MedianCarry"] - g["MedianCarry"].shift(-1)
+    return g
+
+
+def benchmark_bucket(delta, metric):
+    if pd.isna(delta):
+        return "No baseline"
+    tol = 0.02 if metric == "Smash Factor" else 3
+    close = 0.05 if metric == "Smash Factor" else 8
+    if abs(delta) <= tol:
+        return "About even"
+    if delta > 0:
+        return "Better"
+    if delta >= -close:
+        return "Close"
+    return "Worse"
+
+
+
+def _safe_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+
+def append_to_master_csv(new_df, master_path):
+    """Append normalized shots into the local master CSV, with light de-duping."""
+    if new_df is None or new_df.empty:
+        return 0, 0
+    master_path = Path(master_path)
+    incoming = ensure_shot_schema(new_df.copy())
+    if master_path.exists():
+        try:
+            existing = prepare_data_from_path(str(master_path))
+            existing = ensure_shot_schema(existing)
+        except Exception:
+            existing = pd.DataFrame()
+    else:
+        existing = pd.DataFrame()
+
+    key_cols = [c for c in ["Player", "Session Label", "Club", "Carry", "Ball Speed", "Club Speed", "Smash Factor", "Offline Num"] if c in incoming.columns]
+    if key_cols:
+        for c in key_cols:
+            if c in incoming.columns:
+                if pd.api.types.is_numeric_dtype(incoming[c]) or c.endswith("Num") or c in {"Carry", "Ball Speed", "Club Speed", "Smash Factor"}:
+                    incoming[c] = _safe_num(incoming[c]).round(3)
+                else:
+                    incoming[c] = incoming[c].fillna("").astype(str).str.strip()
+            if c in existing.columns:
+                if pd.api.types.is_numeric_dtype(existing[c]) or c.endswith("Num") or c in {"Carry", "Ball Speed", "Club Speed", "Smash Factor"}:
+                    existing[c] = _safe_num(existing[c]).round(3)
+                else:
+                    existing[c] = existing[c].fillna("").astype(str).str.strip()
+        existing_keys = set(pd.util.hash_pandas_object(existing[key_cols], index=False).astype(str)) if not existing.empty else set()
+        incoming_hash = pd.util.hash_pandas_object(incoming[key_cols], index=False).astype(str)
+        keep_mask = ~incoming_hash.isin(existing_keys)
+        to_add = incoming.loc[keep_mask].copy()
+    else:
+        to_add = incoming.copy()
+
+    if existing.empty:
+        combined = incoming.copy()
+    else:
+        aligned_cols = list(dict.fromkeys(list(existing.columns) + list(incoming.columns)))
+        combined = pd.concat([existing.reindex(columns=aligned_cols), to_add.reindex(columns=aligned_cols)], ignore_index=True)
+
+    combined.to_csv(master_path, index=False)
+    return int(len(to_add)), int(len(incoming))
+
+
+def build_time_key(df):
+    d = df.copy()
+    if "Session Label" not in d.columns:
+        d["Session Label"] = "Session"
+    label = d["Session Label"].fillna("").astype(str)
+    dt = pd.to_datetime(label, errors="coerce")
+    if dt.notna().any():
+        d["_TimeKey"] = dt
+        d["_TimeLabel"] = dt.dt.strftime("%Y-%m-%d")
+    else:
+        cats = pd.Categorical(label)
+        d["_TimeKey"] = pd.Series(cats.codes, index=d.index)
+        d["_TimeLabel"] = label.replace("", "Session")
+    return d
+
+
+def build_gap_optimizer(gtab):
+    out = []
+    if gtab is None or gtab.empty:
+        return pd.DataFrame(columns=["Club", "Next Club", "Gap To Next", "Read", "Why"])
+    for _, r in gtab.dropna(subset=["Gap To Next"]).iterrows():
+        gap = r["Gap To Next"]
+        if pd.isna(gap):
+            continue
+        if gap < 6:
+            read = "Overlap"
+            why = "These two clubs are living too close together. Either the loft gap is small, strike pattern overlaps, or one club is not producing enough separation."
+        elif gap <= 15:
+            read = "Healthy"
+            why = "That is a pretty usable distance gap. It should create cleaner on-course decisions without forcing you to manufacture yardage."
+        else:
+            read = "Big jump"
+            why = "This gap is wider than ideal. A loft tweak, different model, or a dedicated in-between club could eventually tighten the ladder."
+        out.append({"Club": r["Club"], "Next Club": r["Next Club"], "Gap To Next": gap, "Read": read, "Why": why})
+    return pd.DataFrame(out)
+
+
+def best_strike_of_session(df):
+    if df is None or df.empty:
+        return None
+    work = df.copy()
+    for c in ["Ball Speed", "Smash Factor", "Carry", "Offline Num"]:
+        if c not in work.columns:
+            work[c] = np.nan
+    work["bs_z"] = (_safe_num(work["Ball Speed"]) - _safe_num(work["Ball Speed"]).mean()) / (_safe_num(work["Ball Speed"]).std(ddof=0) or 1)
+    work["sm_z"] = (_safe_num(work["Smash Factor"]) - _safe_num(work["Smash Factor"]).mean()) / (_safe_num(work["Smash Factor"]).std(ddof=0) or 1)
+    carry = _safe_num(work["Carry"])
+    work["carry_center"] = 1 - ((carry - carry.median()).abs() / (carry.std(ddof=0) or 1)).clip(lower=0)
+    work["offline_center"] = 1 - (_safe_num(work["Offline Num"]).abs() / (_safe_num(work["Offline Num"]).std(ddof=0) or 1)).clip(lower=0)
+    work["Strike Score"] = work[["bs_z", "sm_z", "carry_center", "offline_center"]].fillna(0).sum(axis=1)
+    idx = work["Strike Score"].idxmax()
+    if pd.isna(idx):
+        return None
+    return work.loc[idx].to_dict()
+
+
+def ellipse_points(df, xcol="Offline Num", ycol="Carry", n=120):
+    d = df[[xcol, ycol]].copy()
+    d[xcol] = _safe_num(d[xcol])
+    d[ycol] = _safe_num(d[ycol])
+    d = d.dropna()
+    if len(d) < 3:
+        return pd.DataFrame(columns=["x", "y"])
+    cov = np.cov(d[xcol], d[ycol])
+    vals, vecs = np.linalg.eigh(cov)
+    order = vals.argsort()[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+    theta = np.linspace(0, 2*np.pi, n)
+    circle = np.array([np.cos(theta), np.sin(theta)])
+    scale = 1.8  # about 1.8 std gives a nice readable shot cloud envelope
+    ell = vecs @ np.diag(np.sqrt(np.maximum(vals, 1e-9)) * scale) @ circle
+    center = np.array([d[xcol].mean(), d[ycol].mean()]).reshape(2, 1)
+    pts = ell + center
+    return pd.DataFrame({"x": pts[0], "y": pts[1]})
+
+
+def confidence_circle_rings(df, offline_col="Offline Num", carry_col="Carry", target_offline=0.0, target_carry=None):
+    cols = [offline_col, carry_col]
+    d = df[cols].copy()
+    d[offline_col] = _safe_num(d[offline_col])
+    d[carry_col] = _safe_num(d[carry_col])
+    d = d.dropna()
+    if d.empty:
+        return pd.DataFrame(columns=["Ring", "Radius", "Pct"]), pd.DataFrame(columns=["x", "y", "Ring"]), pd.DataFrame(columns=["x", "y"])
+    if target_carry is None or pd.isna(target_carry):
+        target_carry = d[carry_col].median()
+    d["dx"] = d[offline_col] - float(target_offline)
+    d["dy"] = d[carry_col] - float(target_carry)
+    d["r"] = np.sqrt(d["dx"]**2 + d["dy"]**2)
+    ring_specs = [("50%", 0.50), ("80%", 0.80), ("95%", 0.95)]
+    ring_rows = []
+    circle_rows = []
+    theta = np.linspace(0, 2 * np.pi, 181)
+    for label, pct in ring_specs:
+        radius = float(np.nanpercentile(d["r"], pct * 100)) if len(d) else np.nan
+        ring_rows.append({"Ring": label, "Radius": radius, "Pct": pct})
+        for t in theta:
+            circle_rows.append({"x": np.cos(t) * radius, "y": np.sin(t) * radius, "Ring": label})
+    pts = d[["dx", "dy"]].rename(columns={"dx": "x", "dy": "y"}).copy()
+    return pd.DataFrame(ring_rows), pd.DataFrame(circle_rows), pts
+
+
+def confidence_circle_insights(rings_df):
+    if rings_df is None or rings_df.empty:
+        return []
+    r50 = float(rings_df.loc[rings_df["Ring"] == "50%", "Radius"].iloc[0]) if (rings_df["Ring"] == "50%").any() else np.nan
+    r80 = float(rings_df.loc[rings_df["Ring"] == "80%", "Radius"].iloc[0]) if (rings_df["Ring"] == "80%").any() else np.nan
+    r95 = float(rings_df.loc[rings_df["Ring"] == "95%", "Radius"].iloc[0]) if (rings_df["Ring"] == "95%").any() else np.nan
+    out = []
+    if not pd.isna(r50):
+        out.append(("50% circle", f"Half of your shots finish within {r50:.1f} yards of your stock target."))
+    if not pd.isna(r80):
+        out.append(("80% circle", f"About four out of five shots finish within {r80:.1f} yards. That is a strong on-course expectation band."))
+    if not pd.isna(r95):
+        out.append(("95% circle", f"Almost every shot sits within {r95:.1f} yards, so that is your real outer cone for strategy."))
+    if not pd.isna(r80):
+        for diam in [20, 25, 30]:
+            prob = (r80 <= diam / 2)
+            label = "Likely playable" if prob else "Needs caution"
+            out.append((f"{diam}-yd green", f"{label}: an {diam}-yard green has a radius of {diam/2:.1f} yards versus your 80% circle of {r80:.1f}."))
+    return out
+
+
+def modeled_birdie_putt_make_pct(feet):
+    if pd.isna(feet):
+        return np.nan
+    feet = float(feet)
+    if feet <= 3:
+        return 0.96
+    if feet <= 6:
+        return 0.72
+    if feet <= 10:
+        return 0.42
+    if feet <= 15:
+        return 0.24
+    if feet <= 20:
+        return 0.16
+    if feet <= 30:
+        return 0.09
+    if feet <= 40:
+        return 0.06
+    return 0.03
+
+
+def modeled_bogey_risk_pct(feet):
+    if pd.isna(feet):
+        return np.nan
+    feet = float(feet)
+    if feet <= 6:
+        return 0.01
+    if feet <= 10:
+        return 0.02
+    if feet <= 15:
+        return 0.04
+    if feet <= 25:
+        return 0.07
+    if feet <= 35:
+        return 0.10
+    if feet <= 45:
+        return 0.13
+    if feet <= 60:
+        return 0.16
+    return 0.20
+
+
+def build_approach_proximity_model(df, low_carry, high_carry, target_carry=None):
+    needed = {"Carry", "Offline Num", "Club"}
+    if df is None or df.empty or not needed.issubset(df.columns):
+        return {}, pd.DataFrame(), pd.DataFrame()
+    d = df.copy()
+    d["Carry"] = _safe_num(d["Carry"])
+    d["Offline Num"] = _safe_num(d["Offline Num"])
+    d = d.dropna(subset=["Carry", "Offline Num"])
+    d = d[(d["Carry"] >= float(low_carry)) & (d["Carry"] <= float(high_carry))].copy()
+    if d.empty:
+        return {}, pd.DataFrame(), pd.DataFrame()
+    if target_carry is None or pd.isna(target_carry):
+        target_carry = (float(low_carry) + float(high_carry)) / 2.0
+    d["Target Carry"] = float(target_carry)
+    d["Carry Delta"] = d["Carry"] - float(target_carry)
+    d["Proximity Yds"] = np.sqrt(d["Offline Num"]**2 + d["Carry Delta"]**2)
+    d["Proximity Ft"] = d["Proximity Yds"] * 3.0
+    d["Birdie Model %"] = d["Proximity Ft"].apply(lambda x: modeled_birdie_putt_make_pct(x) * 100 if pd.notna(x) else np.nan)
+    d["Bogey Model %"] = d["Proximity Ft"].apply(lambda x: modeled_bogey_risk_pct(x) * 100 if pd.notna(x) else np.nan)
+    summary = {
+        "Shots": int(len(d)),
+        "Target Carry": float(target_carry),
+        "Avg Proximity Ft": float(d["Proximity Ft"].mean()),
+        "Median Proximity Ft": float(d["Proximity Ft"].median()),
+        "Birdie Chance %": float(d["Birdie Model %"].mean()),
+        "Bogey Risk %": float(d["Bogey Model %"].mean()),
+        "Best Leave Ft": float(d["Proximity Ft"].min()),
+    }
+    club_table = (
+        d.groupby("Club", dropna=False)
+        .agg(
+            Shots=("Club", "size"),
+            AvgProximityFt=("Proximity Ft", "mean"),
+            MedianProximityFt=("Proximity Ft", "median"),
+            BirdieChancePct=("Birdie Model %", "mean"),
+            BogeyRiskPct=("Bogey Model %", "mean"),
+        )
+        .reset_index()
+        .sort_values(["MedianProximityFt", "AvgProximityFt", "Shots"], ascending=[True, True, False])
+    )
+    return summary, d, club_table
+
+
+def build_wedge_distance_control_model(df, low_carry, high_carry, target_carry=None):
+    needed = {"Carry", "Club"}
+    if df is None or df.empty or not needed.issubset(df.columns):
+        return {}, pd.DataFrame(), pd.DataFrame()
+    d = df.copy()
+    d["Carry"] = _safe_num(d["Carry"])
+    d = d.dropna(subset=["Carry"])
+    d = d[(d["Carry"] >= float(low_carry)) & (d["Carry"] <= float(high_carry))].copy()
+    if d.empty:
+        return {}, pd.DataFrame(), pd.DataFrame()
+    if target_carry is None or pd.isna(target_carry):
+        target_carry = (float(low_carry) + float(high_carry)) / 2.0
+    d["Target Carry"] = float(target_carry)
+    d["Carry Delta"] = d["Carry"] - float(target_carry)
+    d["Abs Carry Delta"] = d["Carry Delta"].abs()
+    avg_carry = float(d["Carry"].mean())
+    std_carry = float(d["Carry"].std(ddof=0)) if len(d) > 1 else 0.0
+    mean_abs_delta = float(d["Abs Carry Delta"].mean())
+    p80 = float(d["Abs Carry Delta"].quantile(0.8)) if len(d) > 1 else mean_abs_delta
+    score = 10 - (std_carry * 0.45 + mean_abs_delta * 0.20)
+    score = max(1.0, min(10.0, score))
+    summary = {
+        "Shots": int(len(d)),
+        "Target Carry": float(target_carry),
+        "Carry Avg": avg_carry,
+        "Carry Median": float(d["Carry"].median()),
+        "Carry Std": std_carry,
+        "Mean Abs Delta": mean_abs_delta,
+        "80% Miss Window": p80,
+        "Distance Control Score": float(score),
+        "Best Shot Delta": float(d["Abs Carry Delta"].min()),
+    }
+    club_table = (
+        d.groupby("Club", dropna=False)
+        .agg(
+            Shots=("Club", "size"),
+            AvgCarry=("Carry", "mean"),
+            MedianCarry=("Carry", "median"),
+            CarryStd=("Carry", lambda s: float(_safe_num(s).std(ddof=0)) if len(_safe_num(s).dropna()) > 1 else 0.0),
+            MeanAbsDelta=("Abs Carry Delta", "mean"),
+        )
+        .reset_index()
+        .sort_values(["MeanAbsDelta", "CarryStd", "Shots"], ascending=[True, True, False])
+    )
+    return summary, d, club_table
+
+
+def build_approach_scoring_expectation(df, low_carry, high_carry, target_carry=None, hole_par=4):
+    summary, d, club_table = build_approach_proximity_model(df, low_carry, high_carry, target_carry)
+    if d.empty:
+        return {}, pd.DataFrame(), pd.DataFrame()
+    d = d.copy()
+    d["Birdie P"] = _safe_num(d["Birdie Model %"]) / 100.0
+    d["Bogey P"] = _safe_num(d["Bogey Model %"]) / 100.0
+    d["Par P"] = (1.0 - d["Birdie P"] - d["Bogey P"]).clip(lower=0.0, upper=1.0)
+    denom = d[["Birdie P", "Par P", "Bogey P"]].sum(axis=1).replace(0, np.nan)
+    d["Birdie P"] = d["Birdie P"] / denom
+    d["Par P"] = d["Par P"] / denom
+    d["Bogey P"] = d["Bogey P"] / denom
+    d["Expected Score"] = (hole_par - 1) * d["Birdie P"] + hole_par * d["Par P"] + (hole_par + 1) * d["Bogey P"]
+    summary = {
+        "Shots": int(len(d)),
+        "Target Carry": float(summary.get("Target Carry", target_carry if target_carry is not None else (float(low_carry)+float(high_carry))/2.0)),
+        "Avg Proximity Ft": float(d["Proximity Ft"].mean()),
+        "Birdie %": float(d["Birdie P"].mean() * 100.0),
+        "Par %": float(d["Par P"].mean() * 100.0),
+        "Bogey+ %": float(d["Bogey P"].mean() * 100.0),
+        "Expected Score": float(d["Expected Score"].mean()),
+        "Hole Par": int(hole_par),
+    }
+    club_table = (
+        d.groupby("Club", dropna=False)
+        .agg(
+            Shots=("Club", "size"),
+            AvgProximityFt=("Proximity Ft", "mean"),
+            BirdiePct=("Birdie P", lambda s: float(_safe_num(s).mean() * 100.0)),
+            ParPct=("Par P", lambda s: float(_safe_num(s).mean() * 100.0)),
+            BogeyPct=("Bogey P", lambda s: float(_safe_num(s).mean() * 100.0)),
+            ExpectedScore=("Expected Score", "mean"),
+        )
+        .reset_index()
+        .sort_values(["ExpectedScore", "AvgProximityFt", "Shots"], ascending=[True, True, False])
+    )
+    return summary, d, club_table
+
+
+def trend_summary(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    d = build_time_key(df)
+    group_cols = ["_TimeKey", "_TimeLabel"]
+    if "Player" in d.columns:
+        group_cols.append("Player")
+    out = (
+        d.groupby(group_cols, dropna=False)
+        .agg(
+            Shots=("Club", "size"),
+            Carry=("Carry", "median"),
+            BallSpeed=("Ball Speed", "median"),
+            Smash=("Smash Factor", "median"),
+            Offline=("Offline Num", lambda s: _safe_num(s).abs().median()),
+        )
+        .reset_index()
+        .sort_values("_TimeKey")
+    )
+    return out
+
+
+def trend_delta_text(series):
+    s = _safe_num(series).dropna()
+    if len(s) < 2:
+        return "Need at least two sessions."
+    delta = s.iloc[-1] - s.iloc[0]
+    sign = "+" if delta > 0 else ""
+    return f"{sign}{delta:.1f}"
+
+
+
+def render_trivia_block(page_key, heading="Fun trivia corner"):
+    state_key = f"trivia_idx_{page_key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = random.randrange(len(TRIVIA_FACTS))
+    c1, c2 = st.columns([6,1])
+    with c1:
+        st.markdown(f"#### {heading}")
+    with c2:
+        if st.button("New fact", key=f"btn_{page_key}"):
+            st.session_state[state_key] = random.randrange(len(TRIVIA_FACTS))
+    cat, fact = TRIVIA_FACTS[st.session_state[state_key]]
+    st.markdown(f"<div class='trivia-card'><div class='trivia-cat'>{cat}</div><div class='trivia-text'>{fact}</div></div>", unsafe_allow_html=True)
+
+
 st.markdown(
     """
     <style>
@@ -723,6 +1234,39 @@ st.markdown(
         border: 1px solid rgba(255,255,255,.08);
         margin-bottom: 10px;
     }
+    .analysis-stat-card {
+        background: linear-gradient(180deg, #10131a 0%, #171b23 100%);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 16px;
+        padding: 12px 14px;
+        min-height: 104px;
+        box-shadow: 0 8px 22px rgba(0,0,0,.14);
+        margin-bottom: 8px;
+    }
+    .analysis-stat-title {
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: rgba(255,255,255,.68);
+        margin-bottom: 8px;
+        font-weight: 700;
+    }
+    .analysis-stat-value {
+        font-size: 1.55rem;
+        line-height: 1.12;
+        font-weight: 800;
+        margin-bottom: 6px;
+        word-break: break-word;
+    }
+    .analysis-stat-value.pattern {
+        font-size: 1.05rem;
+        font-weight: 700;
+    }
+    .analysis-stat-note {
+        font-size: 0.84rem;
+        line-height: 1.28;
+        color: rgba(255,255,255,.72);
+    }
     .hero-card {
         background: linear-gradient(180deg, #111827 0%, #1f2937 100%);
         border: 1px solid rgba(255,255,255,.09);
@@ -750,6 +1294,26 @@ st.markdown(
         border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.05);
         margin-right: 6px; margin-bottom: 6px; font-size: .82rem;
     }
+    .trivia-card {
+        background: linear-gradient(180deg, rgba(49,46,129,.28) 0%, rgba(17,24,39,.78) 100%);
+        border: 1px solid rgba(255,255,255,.10);
+        border-radius: 16px;
+        padding: 14px 16px;
+        margin-top: 8px;
+        margin-bottom: 10px;
+    }
+    .trivia-cat {
+        font-size: .78rem;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        opacity: .72;
+        margin-bottom: 8px;
+    }
+    .trivia-text {
+        font-size: 1rem;
+        line-height: 1.45;
+        font-weight: 500;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -763,7 +1327,7 @@ with st.sidebar:
     auto_file = find_auto_file()
     source_mode = st.radio(
         "How should the app load data?",
-        ["Auto-load Launch.csv", "Upload a different CSV"],
+        ["Auto-load Launch.csv", "Upload and analyze only", "Upload and append into Launch.csv"],
         index=0,
     )
 
@@ -776,12 +1340,22 @@ with st.sidebar:
         else:
             shots = prepare_data_from_path(str(auto_file))
             source_label = str(auto_file)
-            st.success(f"Loaded: {auto_file.name}")
-    else:
+            st.success(f"Loaded: {Path(auto_file).name}")
+    elif source_mode == "Upload and analyze only":
         uploaded = st.file_uploader("Upload one master CSV file", type=["csv"])
         if uploaded is not None:
             shots = prepare_data_from_bytes(uploaded.getvalue(), uploaded.name)
             source_label = uploaded.name
+    else:
+        uploaded = st.file_uploader("Upload session CSV to append into Launch.csv", type=["csv"])
+        target_path = Path.cwd() / MASTER_OUTPUT_FILE
+        st.caption(f"New sessions will be appended into: {target_path}")
+        if uploaded is not None:
+            incoming = prepare_data_from_bytes(uploaded.getvalue(), uploaded.name)
+            added, incoming_total = append_to_master_csv(incoming, target_path)
+            st.success(f"Added {added} new shots out of {incoming_total} parsed rows into {target_path.name}.")
+            shots = prepare_data_from_path(str(target_path))
+            source_label = str(target_path)
 
 if shots is None:
     st.info("Put Launch.csv in the same folder as this app, or choose a file from the sidebar.")
@@ -901,7 +1475,7 @@ for c in [
 
 best_three, worst_three = build_best_worst_lists(club_summary)
 
-overview_tab, benchmark_tab, data_tab = st.tabs(["Overview", "Benchmark Analysis", "Shot Tables"])
+overview_tab, analysis_tab, progress_tab, benchmark_tab, data_tab = st.tabs(["Overview", "Analysis Lab", "Progress Over Time", "Benchmark Analysis", "Shot Tables"])
 
 with overview_tab:
     st.subheader("At-a-Glance Read")
@@ -1012,6 +1586,22 @@ with overview_tab:
                     unsafe_allow_html=True,
                 )
 
+
+    st.subheader("Best strike of the session")
+    strike = best_strike_of_session(filtered)
+    if not strike:
+        st.info("Need a few more usable shots before I can confidently flag the best strike.")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Club", strike.get("Club", "—"))
+        c2.metric("Carry", "—" if pd.isna(strike.get("Carry", np.nan)) else f"{float(strike.get('Carry')):.1f} yds")
+        c3.metric("Ball Speed", "—" if pd.isna(strike.get("Ball Speed", np.nan)) else f"{float(strike.get('Ball Speed')):.1f} mph")
+        c4.metric("Smash", "—" if pd.isna(strike.get("Smash Factor", np.nan)) else f"{float(strike.get('Smash Factor')):.2f}")
+        st.markdown(
+            "<div class='note-box'>Best strike blends strong ball speed, efficient smash, carry near your playable stock window, and a start line that stayed near center. It is not just the longest shot — it is the best all-around gamer swing in this filtered set.</div>",
+            unsafe_allow_html=True,
+        )
+
     st.subheader(f"{metric_sel} Analysis")
     metric_df = filtered.dropna(subset=[metric_sel]).copy() if metric_sel in filtered.columns else pd.DataFrame()
     if metric_df.empty:
@@ -1094,8 +1684,21 @@ with overview_tab:
                     alt.Tooltip(metric_sel + ":Q", title=metric_sel, format=metric_fmt),
                 ],
             )
+            ellipse_df = ellipse_points(disp_df, "Offline Num", "Carry")
+            layers = [scatter]
+            if not ellipse_df.empty:
+                ellipse = alt.Chart(ellipse_df).mark_line(strokeWidth=3, opacity=0.85).encode(
+                    x=alt.X("x:Q", title="Offline"),
+                    y=alt.Y("y:Q", title="Carry"),
+                )
+                layers.append(ellipse)
             vline = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(strokeDash=[5, 5], size=2).encode(x="x:Q")
-            st.altair_chart((scatter + vline).properties(height=320), use_container_width=True)
+            layers.append(vline)
+            chart = layers[0]
+            for lyr in layers[1:]:
+                chart = chart + lyr
+            st.altair_chart(chart.properties(height=320), use_container_width=True)
+            st.caption("The outline is a shot-shape ellipse. It gives you the quick feel for how wide and how deep the pattern really is, without staring at every dot.")
         else:
             st.info("Need both carry and offline data for the combo dispersion view.")
 
@@ -1123,6 +1726,434 @@ with overview_tab:
         hide_index=True,
     )
 
+    render_trivia_block("overview", "Random sports & film trivia")
+
+with analysis_tab:
+    st.subheader("Analysis Lab")
+    s1, s2, s3 = st.columns(3)
+    session_score = overall_session_score(club_summary)
+    top_bias = "No offline data"
+    pattern_note = "No usable offline column in this filtered slice."
+    if "Offline Num" in filtered.columns and filtered["Offline Num"].dropna().any():
+        off_mean = filtered["Offline Num"].dropna().mean()
+        off_std = filtered["Offline Num"].dropna().std()
+        if abs(off_mean) <= 3:
+            top_bias = "🎯 Neutral start line overall"
+            pattern_note = "Average start line is sitting close to center."
+        elif off_mean > 3:
+            top_bias = "➡️ Overall right bias"
+            pattern_note = "Average finish location is leaking right of target."
+        else:
+            top_bias = "⬅️ Overall left bias"
+            pattern_note = "Average finish location is finishing left of target."
+        if pd.notna(off_std):
+            pattern_note += f" Typical spread: {off_std:.1f} yds."
+
+    if len(club_summary) >= 2:
+        gtab = gap_table(club_summary)
+        valid_gaps = gtab["Gap To Next"].dropna()
+        gap_value = "—" if valid_gaps.empty else f"{valid_gaps.mean():.1f} yds"
+        gap_note = "Need at least two clubs with carry data." if valid_gaps.empty else f"Across {len(valid_gaps)} measured club gaps in this view."
+    else:
+        gap_value = "—"
+        gap_note = "Need at least two clubs with carry data."
+
+    score_value = "—" if pd.isna(session_score) else f"{session_score:.1f}/10"
+    score_note = "Blend of carry consistency, strike quality, and direction control."
+
+    with s1:
+        st.markdown(f"""
+        <div class='analysis-stat-card'>
+            <div class='analysis-stat-title'>Overall ball-striking score</div>
+            <div class='analysis-stat-value'>{score_value}</div>
+            <div class='analysis-stat-note'>{score_note}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with s2:
+        st.markdown(f"""
+        <div class='analysis-stat-card'>
+            <div class='analysis-stat-title'>Primary pattern</div>
+            <div class='analysis-stat-value pattern'>{top_bias}</div>
+            <div class='analysis-stat-note'>{pattern_note}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with s3:
+        st.markdown(f"""
+        <div class='analysis-stat-card'>
+            <div class='analysis-stat-title'>Avg gap</div>
+            <div class='analysis-stat-value'>{gap_value}</div>
+            <div class='analysis-stat-note'>{gap_note}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    left_col, right_col = st.columns(2)
+    with left_col:
+        st.markdown("**Distance ladder**")
+        ladder_df = club_summary.sort_values(["Club Sort", "Club"], ascending=[False, True]).copy()
+        ladder = alt.Chart(ladder_df).mark_bar(size=18, cornerRadius=6).encode(
+            y=alt.Y("Club:N", sort=None, title="Club"),
+            x=alt.X("MedianCarry:Q", title="Stock Carry (yds)"),
+            color=alt.Color("MedianCarry:Q", legend=None),
+            tooltip=["Club", alt.Tooltip("MedianCarry:Q", title="Stock Carry", format=".0f"), alt.Tooltip("CarryP25:Q", title="25th %", format=".0f"), alt.Tooltip("CarryP75:Q", title="75th %", format=".0f")],
+        )
+        labels = alt.Chart(ladder_df).mark_text(align="left", dx=8, fontWeight="bold").encode(
+            y=alt.Y("Club:N", sort=None), x="MedianCarry:Q", text=alt.Text("MedianCarry:Q", format=".0f")
+        )
+        st.altair_chart((ladder + labels).properties(height=max(260, 36 * len(ladder_df))), use_container_width=True)
+
+        gap_df = gap_table(club_summary)[["Club", "Next Club", "Gap To Next"]].dropna().copy()
+        if not gap_df.empty:
+            gap_df["Gap Label"] = gap_df.apply(lambda r: f"{r['Club']} → {r['Next Club']}: {r['Gap To Next']:.0f} yds", axis=1)
+            st.markdown("**Gap reads**")
+            for _, r in gap_df.iterrows():
+                st.markdown(f"<div class='bench-chip'>{r['Gap Label']}</div>", unsafe_allow_html=True)
+            gap_reads = build_gap_optimizer(gap_df)
+            st.markdown("**Gap optimizer**")
+            for _, r in gap_reads.iterrows():
+                st.markdown(
+                    f"<div class='rank-card'><div class='rank-label'>{r['Read']}</div><div class='rank-club'>{r['Club']} → {r['Next Club']}</div><div class='rank-why'>{r['Why']}</div><div class='bench-chip'>Current gap: {r['Gap To Next']:.0f} yds</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+    with right_col:
+        st.markdown("**Shot pattern heatmap**")
+        if has_offline and has_carry:
+            heat_df = filtered.dropna(subset=["Offline Num", "Carry"]).copy()
+            heat = alt.Chart(heat_df).mark_rect().encode(
+                x=alt.X("Offline Num:Q", bin=alt.Bin(maxbins=18), title="Offline"),
+                y=alt.Y("Carry:Q", bin=alt.Bin(maxbins=18), title="Carry"),
+                color=alt.Color("count():Q", title="Shots"),
+                tooltip=[alt.Tooltip("count():Q", title="Shots")],
+            )
+            vline = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(strokeDash=[4,4], color="white").encode(x="x:Q")
+            st.altair_chart((heat + vline).properties(height=360), use_container_width=True)
+        else:
+            st.info("Need offline and carry data for the heatmap.")
+
+    st.subheader("Shot dispersion confidence circle")
+    conf_clubs = [c for c in club_summary["Club"].dropna().astype(str).tolist() if c != ""]
+    if conf_clubs and has_offline and has_carry:
+        default_conf_idx = 0
+        if club_sel != "All Clubs" and club_sel in conf_clubs:
+            default_conf_idx = conf_clubs.index(club_sel)
+        conf_club = st.selectbox("Confidence circle club", conf_clubs, index=default_conf_idx, key="conf_circle_club")
+        conf_df = filtered[filtered["Club"] == conf_club].dropna(subset=["Offline Num", "Carry"]).copy()
+        if len(conf_df) >= 5:
+            target_carry = float(conf_df["Carry"].median())
+            rings_df, circles_df, conf_pts = confidence_circle_rings(conf_df, target_offline=0.0, target_carry=target_carry)
+            cc1, cc2 = st.columns([1.35, 1])
+            with cc1:
+                base = alt.Chart(conf_pts).mark_circle(size=85, opacity=0.6).encode(
+                    x=alt.X("x:Q", title="Offline vs target (yds)"),
+                    y=alt.Y("y:Q", title="Carry delta vs stock (yds)"),
+                    tooltip=[alt.Tooltip("x:Q", title="Offline", format="+.1f"), alt.Tooltip("y:Q", title="Carry Δ", format="+.1f")],
+                )
+                ring_lines = alt.Chart(circles_df).mark_line(strokeWidth=2.5).encode(
+                    x="x:Q",
+                    y="y:Q",
+                    detail="Ring:N",
+                    color=alt.Color("Ring:N", sort=["50%", "80%", "95%"], legend=alt.Legend(title="Confidence rings")),
+                    tooltip=["Ring:N"],
+                )
+                v0 = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(strokeDash=[5,5], opacity=0.6).encode(x="x:Q")
+                h0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[5,5], opacity=0.6).encode(y="y:Q")
+                st.altair_chart((ring_lines + base + v0 + h0).properties(height=440), use_container_width=True)
+                st.caption(f"Centered on {conf_club}'s stock target: 0 yards offline and {target_carry:.0f} yards carry. The circles show where roughly 50%, 80%, and 95% of your shots finish.")
+            with cc2:
+                st.markdown(f"**{conf_club} target-read**")
+                ring_show = rings_df.copy()
+                ring_show["Radius"] = ring_show["Radius"].map(lambda x: round(float(x), 1) if pd.notna(x) else x)
+                st.dataframe(ring_show[["Ring", "Radius"]], use_container_width=True, hide_index=True)
+                for title, msg in confidence_circle_insights(rings_df):
+                    st.markdown(f"<div class='rank-card'><div class='rank-label'>{title}</div><div class='rank-why'>{msg}</div></div>", unsafe_allow_html=True)
+        else:
+            st.info("Need at least 5 clean shots with carry and offline data for the confidence circle.")
+    else:
+        st.info("Need at least one club plus carry and offline data to build the confidence circle.")
+
+    st.subheader("Metric explorer")
+    exp_left, exp_right = st.columns(2)
+    with exp_left:
+        metric_df = filtered.dropna(subset=[metric_sel]).copy()
+        if not metric_df.empty:
+            metric_chart = alt.Chart(metric_df).mark_boxplot(size=34).encode(
+                x=alt.X("Club:N", sort=None, title="Club"),
+                y=alt.Y(f"{metric_sel}:Q", title=metric_axis_label(metric_sel)),
+                color=alt.Color("Club:N", legend=None),
+                tooltip=["Club"],
+            ).properties(height=340)
+            st.altair_chart(metric_chart, use_container_width=True)
+        else:
+            st.info("No values available for the selected metric.")
+    with exp_right:
+        metric_summary = club_summary[["Club", "Shots", "MetricMedian", "MetricMean", "MetricStd", "Pattern"]].copy()
+        metric_summary = metric_summary.sort_values("MetricMedian", ascending=False)
+        st.dataframe(metric_summary, use_container_width=True, hide_index=True)
+
+    st.subheader("Wedge distance control")
+    if has_carry:
+        wedge_source = filtered.dropna(subset=["Carry"]).copy()
+        if not wedge_source.empty:
+            wedge_min_data = int(math.floor(float(wedge_source["Carry"].min()) / 5.0) * 5)
+            wedge_max_data = int(math.ceil(float(wedge_source["Carry"].max()) / 5.0) * 5)
+            wedge_max = min(140, wedge_max_data)
+            wedge_min = min(wedge_min_data, wedge_max - 10)
+            if wedge_max - wedge_min >= 10:
+                default_wedge_low = max(wedge_min, min(40, wedge_max - 10))
+                default_wedge_high = min(wedge_max, max(default_wedge_low + 10, min(100, wedge_max)))
+                if default_wedge_high <= default_wedge_low:
+                    default_wedge_high = min(wedge_max, default_wedge_low + 10)
+                wa, wb = st.columns([1.2, 1])
+                with wa:
+                    wedge_bucket = st.slider(
+                        "Wedge carry bucket (yds)",
+                        min_value=int(wedge_min),
+                        max_value=int(wedge_max),
+                        value=(int(default_wedge_low), int(default_wedge_high)),
+                        step=5,
+                        key="wedge_control_bucket",
+                    )
+                with wb:
+                    wedge_target = st.number_input(
+                        "Wedge target carry",
+                        min_value=float(wedge_min),
+                        max_value=float(wedge_max),
+                        value=float((default_wedge_low + default_wedge_high) / 2),
+                        step=1.0,
+                        key="wedge_control_target",
+                    )
+                wedge_summary, wedge_points, wedge_clubs = build_wedge_distance_control_model(
+                    wedge_source, wedge_bucket[0], wedge_bucket[1], wedge_target
+                )
+                if wedge_points.empty:
+                    st.info("No shots landed inside that wedge carry bucket.")
+                else:
+                    w1, w2, w3, w4 = st.columns(4)
+                    w1.metric("Carry avg", f"{wedge_summary['Carry Avg']:.1f} yds")
+                    w2.metric("Std dev", f"{wedge_summary['Carry Std']:.1f} yds")
+                    w3.metric("Avg miss to target", f"{wedge_summary['Mean Abs Delta']:.1f} yds")
+                    w4.metric("Distance control score", f"{wedge_summary['Distance Control Score']:.1f}/10")
+                    st.caption("Modeled from carry only. Lower standard deviation and lower average miss to target produce a stronger wedge distance-control score.")
+                    wx, wy = st.columns([1.2, 1])
+                    with wx:
+                        wedge_points = wedge_points.reset_index(drop=True).copy()
+                        wedge_points["Shot #"] = np.arange(1, len(wedge_points) + 1)
+                        wedge_chart = alt.Chart(wedge_points).mark_circle(size=90, opacity=0.72).encode(
+                            x=alt.X("Shot #:Q", title="Shot sequence"),
+                            y=alt.Y("Carry Delta:Q", title="Carry delta vs target (yds)"),
+                            color=alt.Color("Abs Carry Delta:Q", title="Miss (yds)", scale=alt.Scale(scheme="teals")),
+                            tooltip=[
+                                "Club",
+                                alt.Tooltip("Carry:Q", title="Carry", format=".1f"),
+                                alt.Tooltip("Carry Delta:Q", title="Carry Δ", format="+.1f"),
+                                alt.Tooltip("Abs Carry Delta:Q", title="Abs miss", format=".1f"),
+                            ],
+                        )
+                        h0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[5, 5], opacity=0.6).encode(y="y:Q")
+                        st.altair_chart((wedge_chart + h0).properties(height=360), use_container_width=True)
+                    with wy:
+                        st.markdown(f"**{int(wedge_bucket[0])}-{int(wedge_bucket[1])} yds wedge read**")
+                        if wedge_summary['Distance Control Score'] >= 8:
+                            wedge_read = "Elite distance control"
+                            wedge_why = "The bucket is staying tight around the target, which is exactly what you want from scoring clubs."
+                        elif wedge_summary['Distance Control Score'] >= 6:
+                            wedge_read = "Playable scoring control"
+                            wedge_why = "There is enough consistency here to attack flags when the lie is clean, but you still have some spread to tighten."
+                        else:
+                            wedge_read = "Needs tighter wedge windows"
+                            wedge_why = "The average miss and overall spread are still wide enough that distance control is leaking strokes."
+                        st.markdown(
+                            f"<div class='rank-card'><div class='rank-label'>{wedge_read}</div><div class='rank-why'>{wedge_why}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"<div class='rank-card'><div class='rank-label'>Best shot to target</div><div class='rank-club'>{wedge_summary['Best Shot Delta']:.1f} yds off</div><div class='rank-why'>Closest carry to the selected target in this wedge bucket.</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                    if not wedge_clubs.empty:
+                        wedge_show = wedge_clubs.rename(columns={
+                            "AvgCarry": "Avg Carry",
+                            "MedianCarry": "Median Carry",
+                            "CarryStd": "Std Dev",
+                            "MeanAbsDelta": "Avg Miss",
+                        }).copy()
+                        wedge_show["Distance Control Score"] = (10 - (wedge_show["Std Dev"] * 0.45 + wedge_show["Avg Miss"] * 0.20)).clip(lower=1, upper=10)
+                        st.markdown("**By club inside this wedge bucket**")
+                        st.dataframe(wedge_show.round(1), use_container_width=True, hide_index=True)
+            else:
+                st.info("Need more short-carry data to build the wedge control model.")
+        else:
+            st.info("Need clean carry data to build the wedge control model.")
+    else:
+        st.info("Need carry data to build the wedge control model.")
+
+    st.subheader("Approach scoring expectation")
+    if has_offline and has_carry:
+        score_source = filtered.dropna(subset=["Carry", "Offline Num"]).copy()
+        if not score_source.empty:
+            sc_min = int(math.floor(float(score_source["Carry"].min()) / 5.0) * 5)
+            sc_max = int(math.ceil(float(score_source["Carry"].max()) / 5.0) * 5)
+            if sc_max - sc_min >= 10:
+                default_sc_low = max(sc_min, min(150, sc_max - 10))
+                default_sc_high = min(sc_max, max(default_sc_low + 10, 170))
+                if default_sc_high <= default_sc_low:
+                    default_sc_high = min(sc_max, default_sc_low + 10)
+                sa, sb, sc = st.columns([1.15, 1, 0.7])
+                with sa:
+                    score_bucket = st.slider(
+                        "Scoring model carry bucket (yds)",
+                        min_value=sc_min,
+                        max_value=sc_max,
+                        value=(default_sc_low, default_sc_high),
+                        step=5,
+                        key="approach_scoring_bucket",
+                    )
+                with sb:
+                    score_target = st.number_input(
+                        "Scoring model target carry",
+                        min_value=float(sc_min),
+                        max_value=float(sc_max),
+                        value=float((default_sc_low + default_sc_high) / 2),
+                        step=1.0,
+                        key="approach_scoring_target",
+                    )
+                with sc:
+                    hole_par = st.selectbox("Hole par", [3, 4, 5], index=1, key="approach_scoring_par")
+                score_summary, score_points, score_clubs = build_approach_scoring_expectation(
+                    score_source, score_bucket[0], score_bucket[1], score_target, hole_par=hole_par
+                )
+                if score_points.empty:
+                    st.info("No clean shots landed inside that scoring bucket.")
+                else:
+                    s1, s2, s3, s4 = st.columns(4)
+                    s1.metric("Expected score", f"{score_summary['Expected Score']:.2f}")
+                    s2.metric("Birdie", f"{score_summary['Birdie %']:.1f}%")
+                    s3.metric("Par", f"{score_summary['Par %']:.1f}%")
+                    s4.metric("Bogey+", f"{score_summary['Bogey+ %']:.1f}%")
+                    st.caption(
+                        f"Modeled finish for a par-{int(score_summary['Hole Par'])} hole from this approach window. These are leave-based estimates built from proximity and dispersion, not tracked on-course outcomes."
+                    )
+                    sx, sy = st.columns([1.2, 1])
+                    with sx:
+                        plot_df = pd.DataFrame({
+                            "Result": ["Birdie", "Par", "Bogey+"],
+                            "Probability": [score_summary["Birdie %"] / 100.0, score_summary["Par %"] / 100.0, score_summary["Bogey+ %"] / 100.0],
+                        })
+                        prob_chart = alt.Chart(plot_df).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+                            x=alt.X("Result:N", sort=["Birdie", "Par", "Bogey+"], title=None),
+                            y=alt.Y("Probability:Q", axis=alt.Axis(format="%"), title="Modeled probability"),
+                            color=alt.Color("Result:N", legend=None),
+                            tooltip=[alt.Tooltip("Probability:Q", title="Probability", format=".1%")],
+                        )
+                        st.altair_chart(prob_chart.properties(height=330), use_container_width=True)
+                    with sy:
+                        diff = score_summary['Expected Score'] - score_summary['Hole Par']
+                        if diff <= -0.15:
+                            score_read = "Scoring pressure window"
+                            score_why = "The modeled birdie rate is high enough that this approach bucket should create real red-number chances."
+                        elif diff <= 0.15:
+                            score_read = "Par-forward window"
+                            score_why = "This bucket is projecting mostly par golf with some birdie upside when the leave stays tight."
+                        else:
+                            score_read = "Bogey pressure window"
+                            score_why = "Dispersion and leave quality are pushing too many outcomes away from stress-free pars."
+                        st.markdown(
+                            f"<div class='rank-card'><div class='rank-label'>{score_read}</div><div class='rank-why'>{score_why}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"<div class='rank-card'><div class='rank-label'>Target</div><div class='rank-club'>{score_summary['Target Carry']:.0f} yds</div><div class='rank-why'>Built from {score_summary['Shots']} clean shots in this scoring bucket.</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(
+                            f"<div class='rank-card'><div class='rank-label'>Avg proximity</div><div class='rank-club'>{score_summary['Avg Proximity Ft']:.0f} ft</div><div class='rank-why'>Closer average leaves push birdie probability up and bogey risk down.</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                    if not score_clubs.empty:
+                        score_show = score_clubs.rename(columns={
+                            "AvgProximityFt": "Avg Proximity (ft)",
+                            "BirdiePct": "Birdie %",
+                            "ParPct": "Par %",
+                            "BogeyPct": "Bogey+ %",
+                            "ExpectedScore": "Expected Score",
+                        }).copy()
+                        st.markdown("**By club inside this scoring bucket**")
+                        st.dataframe(score_show.round(2), use_container_width=True, hide_index=True)
+            else:
+                st.info("Need a wider carry range in the current filters to build the scoring model.")
+        else:
+            st.info("Need clean carry and offline data to build the scoring model.")
+    else:
+        st.info("Need carry and offline data to build the scoring model.")
+
+    render_trivia_block("analysis", "Random sports & culture trivia")
+
+
+with progress_tab:
+    st.subheader("Progress Over Time")
+    trend_df = trend_summary(shots if player_sel == "All Players" else shots[shots["Player"] == player_sel])
+    if trend_df.empty or trend_df["_TimeLabel"].nunique() < 2:
+        st.info("Add at least two dated sessions to Launch.csv and this tab will start tracking improvement over time.")
+    else:
+        p1, p2, p3, p4 = st.columns(4)
+        carry_delta = trend_delta_text(trend_df["Carry"])
+        bs_delta = trend_delta_text(trend_df["BallSpeed"])
+        smash_delta = trend_delta_text(trend_df["Smash"])
+        offline_delta = trend_delta_text(-trend_df["Offline"])  # improvement if lower abs offline
+        p1.metric("Carry trend", carry_delta, help="Last session median carry minus first tracked session median carry.")
+        p2.metric("Ball speed trend", bs_delta)
+        p3.metric("Smash trend", smash_delta)
+        p4.metric("Dispersion trend", offline_delta, help="Positive means your absolute offline miss is shrinking.")
+
+        metric_choice = st.selectbox(
+            "Trend metric",
+            ["Carry", "BallSpeed", "Smash", "Offline"],
+            format_func=lambda x: {"Carry":"Carry", "BallSpeed":"Ball Speed", "Smash":"Smash Factor", "Offline":"Absolute Offline"}.get(x, x),
+            key="trend_metric_choice",
+        )
+        title_map = {"Carry":"Carry", "BallSpeed":"Ball Speed", "Smash":"Smash Factor", "Offline":"Absolute Offline"}
+        base = alt.Chart(trend_df).encode(
+            x=alt.X("_TimeLabel:N", title="Session"),
+            y=alt.Y(f"{metric_choice}:Q", title=title_map.get(metric_choice, metric_choice)),
+            tooltip=["_TimeLabel", "Player", "Shots", alt.Tooltip(f"{metric_choice}:Q", title=title_map.get(metric_choice, metric_choice), format=".1f")],
+        )
+        line = base.mark_line(point=True, strokeWidth=3).encode(color=alt.Color("Player:N", legend=None if player_sel != "All Players" else alt.Legend(title="Player")))
+        st.altair_chart(line.properties(height=360), use_container_width=True)
+
+        st.markdown("**What is moving?**")
+        latest = trend_df.sort_values("_TimeKey").groupby("Player", dropna=False).tail(1).copy()
+        earliest = trend_df.sort_values("_TimeKey").groupby("Player", dropna=False).head(1).copy()
+        merged = latest.merge(earliest, on="Player", suffixes=(" Latest", " First"))
+        for _, r in merged.iterrows():
+            bits = []
+            cdelta = r["Carry Latest"] - r["Carry First"]
+            bdelta = r["BallSpeed Latest"] - r["BallSpeed First"]
+            sdelta = r["Smash Latest"] - r["Smash First"]
+            odelta = r["Offline First"] - r["Offline Latest"]
+            if cdelta > 3:
+                bits.append(f"carry is up {cdelta:.1f} yds")
+            elif cdelta < -3:
+                bits.append(f"carry is down {abs(cdelta):.1f} yds")
+            if bdelta > 1.5:
+                bits.append(f"ball speed is up {bdelta:.1f} mph")
+            if sdelta > 0.02:
+                bits.append(f"smash is trending cleaner by {sdelta:.2f}")
+            if odelta > 1:
+                bits.append(f"dispersion tightened by {odelta:.1f} yds")
+            if not bits:
+                bits.append("trend line is mostly stable so far")
+            who = r["Player"] if pd.notna(r["Player"]) and str(r["Player"]).strip() else "Current set"
+            st.markdown(f"<div class='rank-card'><div class='rank-club'>{who}</div><div class='rank-why'>{'; '.join(bits).capitalize()}.</div></div>", unsafe_allow_html=True)
+
+        st.dataframe(
+            trend_df.rename(columns={"_TimeLabel":"Session", "BallSpeed":"Ball Speed", "Smash":"Smash Factor", "Offline":"Abs Offline"})[
+                ["Session", "Player", "Shots", "Carry", "Ball Speed", "Smash Factor", "Abs Offline"]
+            ].round(2),
+            use_container_width=True,
+            hide_index=True,
+        )
+    render_trivia_block("progress", "Progress-page trivia")
+
 with benchmark_tab:
     st.subheader("Benchmark View")
     st.markdown(
@@ -1148,18 +2179,20 @@ with benchmark_tab:
             bench_summary[base_col] = np.nan
         bench_summary["Delta"] = bench_summary[player_col] - bench_summary[base_col]
         bench_summary["Read"] = bench_summary["Delta"].apply(lambda x: metric_eval_label(x, focus_metric))
+        bench_summary["Bucket"] = bench_summary["Delta"].apply(lambda x: benchmark_bucket(x, focus_metric))
         bench_summary["Why"] = bench_summary.apply(lambda r: benchmark_reason(r, benchmark_sel), axis=1)
 
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3, b4 = st.columns(4)
         overall_player = bench_summary[player_col].mean()
         overall_base = bench_summary[base_col].mean()
         delta = overall_player - overall_base if pd.notna(overall_player) and pd.notna(overall_base) else np.nan
         b1.metric(f"Avg {focus_metric}", "—" if pd.isna(overall_player) else f"{overall_player:.1f}")
         b2.metric(f"{benchmark_sel}", "—" if pd.isna(overall_base) else f"{overall_base:.1f}")
         b3.metric("Delta", "—" if pd.isna(delta) else delta_text(overall_player, overall_base, metric_unit(focus_metric)))
+        b4.metric("At / above benchmark", f"{int((bench_summary['Bucket'].isin(['About even','Better'])).sum())}")
 
-        same_or_better = bench_summary[bench_summary["Read"].isin(["Right there", "Above baseline"])]
-        needs_work = bench_summary[bench_summary["Read"].isin(["Close", "Gap to close", "Needs strike quality"])]
+        same_or_better = bench_summary[bench_summary["Bucket"].isin(["About even", "Better"])]
+        needs_work = bench_summary[bench_summary["Bucket"].isin(["Close", "Worse"])]
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Where you are even or better**")
@@ -1232,6 +2265,8 @@ with benchmark_tab:
                 bench_show[c] = bench_show[c].round(2 if "Smash" in c else 1)
         st.dataframe(bench_show, use_container_width=True, hide_index=True)
 
+    render_trivia_block("benchmark", "Benchmark break trivia")
+
 with data_tab:
     st.subheader("Shot Tables")
     t1, t2 = st.tabs(["Clean / Current View", "Excluded Shots"])
@@ -1252,3 +2287,5 @@ with data_tab:
             file_name="launch_excluded_shots.csv",
             mime="text/csv",
         )
+
+    render_trivia_block("tables", "One more fun fact before you leave")
