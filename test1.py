@@ -447,6 +447,315 @@ def summarize_putting_by_bucket(frame):
     out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
     return out.sort_values("Bucket").reset_index(drop=True)[["Bucket", "Attempts", "Made", "Pct", "Label"]]
 
+
+def build_putting_skill_fingerprint(frame):
+    d = prepare_putting_frame(frame)
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "OnePutt", "TwoPutt", "ThreePuttPlus", "MakePct", "TwoPuttPct", "ThreePuttPct", "DisplayLabel"])
+
+    out = (
+        d.dropna(subset=["Putt Bucket"])
+         .groupby("Putt Bucket", as_index=False)
+         .agg(
+             Attempts=("Putt Attempt", "sum"),
+             OnePutt=("Putt Made Flag", "sum"),
+             TwoPutt=("Putts Clean", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) == 2).sum())),
+             ThreePuttPlus=("Putts Clean", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) >= 3).sum())),
+             AvgStartFt=("First Putt Distance", "mean")
+         )
+         .rename(columns={"Putt Bucket": "Bucket"})
+    )
+    out["MakePct"] = (out["OnePutt"] / out["Attempts"] * 100).round(1)
+    out["TwoPuttPct"] = (out["TwoPutt"] / out["Attempts"] * 100).round(1)
+    out["ThreePuttPct"] = (out["ThreePuttPlus"] / out["Attempts"] * 100).round(1)
+    out["DisplayLabel"] = out.apply(
+        lambda r: f"{int(r['OnePutt'])}/{int(r['Attempts'])} • {r['MakePct']:.1f}% | 3P {r['ThreePuttPct']:.0f}%",
+        axis=1
+    )
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)
+
+
+def build_putting_zone_stats(frame):
+    d = prepare_putting_frame(frame)
+    if d.empty:
+        return {
+            "inside6": {"attempts": 0, "made": 0, "pct": 0.0},
+            "six10": {"attempts": 0, "made": 0, "pct": 0.0},
+            "ten20": {"attempts": 0, "made": 0, "pct": 0.0},
+            "lag20": {"attempts": 0, "made": 0, "pct": 0.0, "three_putts": 0, "three_putt_pct": 0.0, "two_putt_or_better_pct": 0.0, "avg_start_ft": 0.0},
+        }
+
+    fpd = pd.to_numeric(d["First Putt Distance"], errors="coerce").fillna(0)
+
+    def _basic(mask):
+        block = d[mask].copy()
+        attempts = int(len(block))
+        made = int(pd.to_numeric(block["Putt Made Flag"], errors="coerce").fillna(0).sum()) if attempts else 0
+        pct = (made / attempts * 100.0) if attempts else 0.0
+        return {"attempts": attempts, "made": made, "pct": pct}
+
+    lag_mask = fpd >= 20
+    lag_block = d[lag_mask].copy()
+    lag_attempts = int(len(lag_block))
+    lag_three_putts = int((pd.to_numeric(lag_block["Putts Clean"], errors="coerce").fillna(0) >= 3).sum()) if lag_attempts else 0
+    lag_two_or_better = int((pd.to_numeric(lag_block["Putts Clean"], errors="coerce").fillna(0) <= 2).sum()) if lag_attempts else 0
+
+    return {
+        "inside6": _basic(fpd <= 6),
+        "six10": _basic((fpd > 6) & (fpd <= 10)),
+        "ten20": _basic((fpd > 10) & (fpd <= 20)),
+        "lag20": {
+            "attempts": lag_attempts,
+            "made": int(pd.to_numeric(lag_block["Putt Made Flag"], errors="coerce").fillna(0).sum()) if lag_attempts else 0,
+            "pct": (pd.to_numeric(lag_block["Putt Made Flag"], errors="coerce").fillna(0).sum() / lag_attempts * 100.0) if lag_attempts else 0.0,
+            "three_putts": lag_three_putts,
+            "three_putt_pct": (lag_three_putts / lag_attempts * 100.0) if lag_attempts else 0.0,
+            "two_putt_or_better_pct": (lag_two_or_better / lag_attempts * 100.0) if lag_attempts else 0.0,
+            "avg_start_ft": float(pd.to_numeric(lag_block["First Putt Distance"], errors="coerce").fillna(0).mean()) if lag_attempts else 0.0,
+        },
+    }
+
+
+def _resolve_round_col(frame):
+    for col in ["Round Link", "Round Label", "Round ID"]:
+        if col in frame.columns:
+            return col
+    return None
+
+
+def _round_index(frame):
+    round_col = _resolve_round_col(frame)
+    if round_col and round_col in frame.columns:
+        vals = frame[round_col].dropna()
+        if len(vals):
+            return pd.Index(vals.unique())
+    return pd.Index(["__single_round__"])
+
+
+def _mean_per_round(frame, series_like):
+    if frame is None or frame.empty:
+        return 0.0
+    round_ids = _round_index(frame)
+    round_col = _resolve_round_col(frame)
+    values = pd.to_numeric(series_like, errors="coerce").fillna(0)
+    if round_col and round_col in frame.columns:
+        tmp = frame[[round_col]].copy()
+        tmp["_v"] = values.values
+        grouped = tmp.groupby(round_col, dropna=True)["_v"].sum().reindex(round_ids, fill_value=0)
+        return float(grouped.mean()) if len(grouped) else 0.0
+    return float(values.sum())
+
+
+def _mean_attempts_per_round(frame, mask):
+    if frame is None or frame.empty:
+        return 0.0
+    round_ids = _round_index(frame)
+    round_col = _resolve_round_col(frame)
+    mask = pd.Series(mask, index=frame.index).fillna(False).astype(bool)
+    if round_col and round_col in frame.columns:
+        counts = frame.loc[mask].groupby(round_col, dropna=True).size().reindex(round_ids, fill_value=0)
+        return float(counts.mean()) if len(counts) else 0.0
+    return float(mask.sum())
+
+
+def _hole_count(frame):
+    if frame is None or frame.empty:
+        return 0
+    return int(len(frame))
+
+
+def _per18(total, holes):
+    holes = float(holes or 0)
+    if holes <= 0:
+        return 0.0
+    return float(total) / holes * 18.0
+
+
+def _baseline_label(mode, per18=False):
+    mapping = {
+        "All Time": "All-Time Avg",
+        "Same Year": "Year Avg",
+        "Same Month": "Month Avg",
+        "Same Course": "Course Avg",
+    }
+    base = mapping.get(mode, mode)
+    return f"{base} (Per 18)" if per18 else base
+
+
+def _delta_arrow(delta, higher_better=True, tol=0.05):
+    try:
+        delta = float(delta)
+    except Exception:
+        return "➡️"
+    if abs(delta) <= tol:
+        return "➡️"
+    good = delta > 0 if higher_better else delta < 0
+    return "🔼" if good else "🔽"
+
+
+def build_putting_baseline_snapshot(frame):
+    d = frame.copy()
+    lag = build_putting_zone_stats(d)["lag20"]
+    putts_clean = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0)
+    three_putt_flag = (putts_clean >= 3).astype(int)
+    one_putt_flag = (putts_clean == 1).astype(int)
+    holes = _hole_count(d)
+
+    first_putt = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", pd.NA), errors="coerce")
+    lag_mask = (putts_clean > 0) & (first_putt >= 20)
+
+    return {
+        "holes": holes,
+        "total_putts_per18": _per18(putts_clean.sum(), holes),
+        "one_putt_pct": (float(one_putt_flag.sum()) / holes * 100.0) if holes else 0.0,
+        "three_putts_per18": _per18(three_putt_flag.sum(), holes),
+        "three_putt_pct": (float(three_putt_flag.sum()) / holes * 100.0) if holes else 0.0,
+        "lag_attempts_avg": _mean_attempts_per_round(d, lag_mask),
+        "lag_avg_start_ft": float(lag["avg_start_ft"]),
+        "lag_two_putt_or_better_pct": float(lag["two_putt_or_better_pct"]),
+        "lag_three_putt_pct": float(lag["three_putt_pct"]),
+    }
+
+
+def summarize_three_putt_by_bucket(frame):
+    d = prepare_putting_frame(frame)
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "Label"])
+
+    out = (
+        d.dropna(subset=["Putt Bucket"])
+         .groupby("Putt Bucket", as_index=False)
+         .agg(
+             Attempts=("Putt Attempt", "sum"),
+             Made=("Putts Clean", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) >= 3).sum())),
+         )
+         .rename(columns={"Putt Bucket": "Bucket"})
+    )
+    out["Pct"] = (out["Made"] / out["Attempts"] * 100).round(1)
+    out["Label"] = out.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {r['Pct']:.1f}%", axis=1)
+    out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)[["Bucket", "Attempts", "Made", "Pct", "Label"]]
+
+
+def build_putting_fingerprint_insights(frame):
+    fp = build_putting_skill_fingerprint(frame)
+    if fp.empty:
+        return []
+
+    qualified = fp[pd.to_numeric(fp["Attempts"], errors="coerce").fillna(0) >= 2].copy()
+    if qualified.empty:
+        qualified = fp.copy()
+
+    insights = []
+    if not qualified.empty:
+        strong = qualified.sort_values(["MakePct", "Attempts"], ascending=[False, False]).iloc[0]
+        weak = qualified.sort_values(["MakePct", "Attempts"], ascending=[True, False]).iloc[0]
+        worst_3p = qualified.sort_values(["ThreePuttPct", "Attempts"], ascending=[False, False]).iloc[0]
+
+        insights.append(f"🔥 Strongest putting range: {strong['Bucket']} ({strong['OnePutt']}/{strong['Attempts']}, {strong['MakePct']:.1f}%)")
+        insights.append(f"❄️ Weakest conversion range: {weak['Bucket']} ({weak['OnePutt']}/{weak['Attempts']}, {weak['MakePct']:.1f}%)")
+        if float(worst_3p.get("ThreePuttPct", 0)) > 0:
+            insights.append(f"⚠️ Highest 3-putt pressure zone: {worst_3p['Bucket']} ({worst_3p['ThreePuttPlus']}/{worst_3p['Attempts']}, {worst_3p['ThreePuttPct']:.1f}%)")
+    return insights[:3]
+
+
+def build_short_game_proximity_stats(frame):
+    d = prepare_short_game_frame(frame)
+    if d.empty:
+        return {
+            "attempts": 0,
+            "avg_leave_ft": 0.0,
+            "inside3": 0,
+            "inside3_pct": 0.0,
+            "inside6": 0,
+            "inside6_pct": 0.0,
+            "inside10": 0,
+            "inside10_pct": 0.0,
+            "convert_inside10": 0,
+            "convert_inside10_pct": 0.0,
+        }
+
+    prox = pd.to_numeric(d["SG Proximity"], errors="coerce").fillna(0)
+    putts = pd.to_numeric(d["SG Putts"], errors="coerce").fillna(0)
+    attempts = int(len(d))
+    inside3 = int((prox <= 3).sum())
+    inside6 = int((prox <= 6).sum())
+    inside10 = int((prox <= 10).sum())
+    convert_inside10 = int(((prox <= 10) & (putts == 1)).sum())
+
+    return {
+        "attempts": attempts,
+        "avg_leave_ft": float(prox.mean()) if attempts else 0.0,
+        "inside3": inside3,
+        "inside3_pct": (inside3 / attempts * 100.0) if attempts else 0.0,
+        "inside6": inside6,
+        "inside6_pct": (inside6 / attempts * 100.0) if attempts else 0.0,
+        "inside10": inside10,
+        "inside10_pct": (inside10 / attempts * 100.0) if attempts else 0.0,
+        "convert_inside10": convert_inside10,
+        "convert_inside10_pct": (convert_inside10 / inside10 * 100.0) if inside10 else 0.0,
+    }
+
+
+def build_bogey_avoidance_stats(frame):
+    d = frame.copy()
+    d["GIR Clean"] = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0).astype(int)
+    if "Score to Par" in d.columns:
+        d["ScoreToParN"] = pd.to_numeric(_safe_col(d, "Score to Par", pd.NA), errors="coerce")
+    else:
+        d["ScoreToParN"] = pd.to_numeric(_safe_col(d, "Hole Score", pd.NA), errors="coerce") - pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+
+    miss_gir = d[d["GIR Clean"] == 0].copy()
+    attempts = int(len(miss_gir))
+    bogey_or_better = int((pd.to_numeric(miss_gir["ScoreToParN"], errors="coerce").fillna(99) <= 1).sum()) if attempts else 0
+    par_or_better = int((pd.to_numeric(miss_gir["ScoreToParN"], errors="coerce").fillna(99) <= 0).sum()) if attempts else 0
+    bogey_or_worse = int((pd.to_numeric(miss_gir["ScoreToParN"], errors="coerce").fillna(-99) >= 1).sum()) if attempts else 0
+
+    return {
+        "attempts": attempts,
+        "bogey_or_better": bogey_or_better,
+        "bogey_or_better_pct": (bogey_or_better / attempts * 100.0) if attempts else 0.0,
+        "par_or_better": par_or_better,
+        "par_or_better_pct": (par_or_better / attempts * 100.0) if attempts else 0.0,
+        "bogey_or_worse": bogey_or_worse,
+        "bogey_or_worse_pct": (bogey_or_worse / attempts * 100.0) if attempts else 0.0,
+    }
+
+
+def build_short_game_hole_out_stats(frame):
+    d = frame.copy()
+    rel = _safe_col(d, "Approach Shot Direction Relative to Hole", "").fillna("").astype(str).str.strip().str.lower()
+    gir = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0).astype(int)
+    chip_opps = pd.to_numeric(_safe_col(d, "Chip Opportunity", 0), errors="coerce").fillna(0)
+
+    # Short-game hole outs only: source-of-truth text is "Hole Out",
+    # restricted to missed-GIR / chip-opportunity style holes.
+    hole_out_mask = (rel == "hole out") & ((gir == 0) | (chip_opps > 0))
+    count = int(hole_out_mask.sum())
+    return {"count": count}
+
+
+def build_short_game_insights(frame):
+    prox = build_short_game_proximity_stats(frame)
+    bogey = build_bogey_avoidance_stats(frame)
+    extra = build_short_game_extra_stats(frame)
+    hole_outs = build_short_game_hole_out_stats(frame)
+
+    insights = []
+    if prox["attempts"]:
+        insights.append(f"🎯 Avg short-game leave: {prox['avg_leave_ft']:.1f} ft")
+        insights.append(f"⛳ Inside 6 ft: {prox['inside6']}/{prox['attempts']} ({prox['inside6_pct']:.1f}%)")
+        if prox["inside10"]:
+            insights.append(f"🪄 Converted from inside 10 ft: {prox['convert_inside10']}/{prox['inside10']} ({prox['convert_inside10_pct']:.1f}%)")
+    if bogey["attempts"]:
+        insights.append(f"🛡️ Bogey avoidance after missed GIR: {bogey['par_or_better']}/{bogey['attempts']} ({bogey['par_or_better_pct']:.1f}%)")
+    if hole_outs["count"]:
+        insights.append(f"🕳️ Hole outs: {hole_outs['count']}")
+    elif extra["opportunities"]:
+        insights.append(f"⚠️ Holes needing 2+ chips: {extra['holes_2plus']}/{extra['opportunities']}")
+    return insights[:5]
+
 # =========================================================
 # Short game
 # =========================================================
@@ -587,38 +896,38 @@ def render_paired_compare_bars(compare_df, key_col, key_order, compare_mode, tit
 
     html = """
     <style>
-      .pair-wrap {background:#222; padding:12px; border-radius:12px; margin-bottom:10px;}
-      .pair-cat {margin:10px 0 14px 0; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,.08);}
+      .pair-wrap {background:#222; padding:10px 12px; border-radius:12px; margin-bottom:10px;}
+      .pair-cat {margin:6px 0 9px 0; padding-bottom:7px; border-bottom:1px solid rgba(255,255,255,.08);}
       .pair-cat:last-child {border-bottom:none; margin-bottom:0; padding-bottom:0;}
-      .pair-cat-title {font-weight:700; margin-bottom:6px; color:#fff;}
+      .pair-cat-title {font-weight:700; margin-bottom:4px; color:#fff; font-size:12px; line-height:1.15;}
       .pair-row {
         display:grid;
-        grid-template-columns: 90px minmax(140px, 1fr) 120px 58px;
-        gap:10px;
+        grid-template-columns: 82px minmax(120px, 1fr) 116px 50px;
+        gap:8px;
         align-items:center;
-        margin:4px 0;
+        margin:2px 0;
       }
-      .pair-series {font-size:12px; color:#ddd; font-weight:700;}
+      .pair-series {font-size:11px; color:#ddd; font-weight:700;}
       .pair-bar-bg {
         width:100%;
         background:#3a3a3a;
         border-radius:999px;
-        height:18px;
+        height:14px;
         overflow:hidden;
         position:relative;
       }
       .pair-bar-fill-round {
-        height:18px;
+        height:14px;
         border-radius:999px;
         background:#4f8cff;
       }
       .pair-bar-fill-base {
-        height:18px;
+        height:14px;
         border-radius:999px;
         background:#8a8a8a;
       }
       .pair-value {
-        font-size:12px;
+        font-size:11px;
         color:#fff;
         font-variant-numeric: tabular-nums;
         text-align:left;
@@ -626,7 +935,7 @@ def render_paired_compare_bars(compare_df, key_col, key_order, compare_mode, tit
         font-weight:700;
       }
       .pair-delta {
-        font-size:11px;
+        font-size:10px;
         font-weight:700;
         text-align:right;
         white-space:nowrap;
@@ -690,7 +999,7 @@ def render_paired_compare_bars(compare_df, key_col, key_order, compare_mode, tit
     html += "</div>"
 
     import streamlit.components.v1 as components
-    height_px = max(220, 42 + len(ordered_categories) * 82)
+    height_px = max(180, 38 + len(ordered_categories) * 58)
     components.html(html, height=height_px, scrolling=False)
 
 
@@ -735,38 +1044,38 @@ def render_paired_compare_counts(round_df, bench_df, key_col, key_order, compare
 
     html = """
     <style>
-      .pair-wrap {background:#222; padding:12px; border-radius:12px; margin-bottom:10px;}
-      .pair-cat {margin:10px 0 14px 0; padding-bottom:10px; border-bottom:1px solid rgba(255,255,255,.08);}
+      .pair-wrap {background:#222; padding:10px 12px; border-radius:12px; margin-bottom:10px;}
+      .pair-cat {margin:6px 0 9px 0; padding-bottom:7px; border-bottom:1px solid rgba(255,255,255,.08);}
       .pair-cat:last-child {border-bottom:none; margin-bottom:0; padding-bottom:0;}
-      .pair-cat-title {font-weight:700; margin-bottom:6px; color:#fff;}
+      .pair-cat-title {font-weight:700; margin-bottom:4px; color:#fff; font-size:12px; line-height:1.15;}
       .pair-row {
         display:grid;
-        grid-template-columns: 90px minmax(140px, 1fr) 120px 58px;
-        gap:10px;
+        grid-template-columns: 82px minmax(120px, 1fr) 116px 50px;
+        gap:8px;
         align-items:center;
-        margin:4px 0;
+        margin:2px 0;
       }
-      .pair-series {font-size:12px; color:#ddd; font-weight:700;}
+      .pair-series {font-size:11px; color:#ddd; font-weight:700;}
       .pair-bar-bg {
         width:100%;
         background:#3a3a3a;
         border-radius:999px;
-        height:18px;
+        height:14px;
         overflow:hidden;
         position:relative;
       }
       .pair-bar-fill-round {
-        height:18px;
+        height:14px;
         border-radius:999px;
         background:#4f8cff;
       }
       .pair-bar-fill-base {
-        height:18px;
+        height:14px;
         border-radius:999px;
         background:#8a8a8a;
       }
       .pair-value {
-        font-size:12px;
+        font-size:11px;
         color:#fff;
         font-variant-numeric: tabular-nums;
         text-align:left;
@@ -774,7 +1083,7 @@ def render_paired_compare_counts(round_df, bench_df, key_col, key_order, compare
         font-weight:700;
       }
       .pair-delta {
-        font-size:11px;
+        font-size:10px;
         font-weight:700;
         text-align:right;
         white-space:nowrap;
@@ -836,7 +1145,7 @@ def render_paired_compare_counts(round_df, bench_df, key_col, key_order, compare
     html += "</div>"
 
     import streamlit.components.v1 as components
-    height_px = max(220, 42 + len(ordered_categories) * 82)
+    height_px = max(180, 38 + len(ordered_categories) * 58)
     components.html(html, height=height_px, scrolling=False)
 
 
@@ -1042,7 +1351,7 @@ def render_direction_heatmap(round_dir_df):
         ]
     )
 
-    txt = base.mark_text(fontWeight="bold").encode(text="DisplayLabel:N")
+    txt = base.mark_text(fontWeight="bold").encode(text="Label:N")
     st.altair_chart((rects + txt).properties(height=260), use_container_width=True)
 
 
@@ -2568,7 +2877,7 @@ fw4_m, fw4_t, fw4_pct = _made_total_pct_by_par(round_data, "Fairway", 4)
 fw5_m, fw5_t, fw5_pct = _made_total_pct_by_par(round_data, "Fairway", 5)
 
 seves_total = int(_num(_safe_col(round_data, "Seve", 0)).sum())
-hole_outs_total = int(_num(_safe_col(round_data, "Hole Out", 0)).sum())
+hole_outs_total = build_short_game_hole_out_stats(round_data)["count"]
 arnies_total = int(_num(_safe_col(round_data, "Arnie", 0)).sum())
 
 score_to_par_total = int(_num(_safe_col(round_data, "Score to Par", total_score - sum(pars))).sum())
@@ -3619,6 +3928,11 @@ with tab_putting:
     bench_made = int(bench_putt["Putt Made Flag"].sum()) if not bench_putt.empty else 0
     bench_pct = (bench_made / bench_attempts * 100) if bench_attempts else 0.0
 
+    zone_stats = build_putting_zone_stats(round_data)
+    bench_zone_stats = build_putting_zone_stats(benchmark_df_putt)
+    finger_insights = build_putting_fingerprint_insights(round_data)
+    baseline_putt = build_putting_baseline_snapshot(benchmark_df_putt)
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Round Putt Attempts", round_attempts)
@@ -3629,24 +3943,130 @@ with tab_putting:
     with c4:
         st.metric(f"{compare_mode_putt} 1-Putts", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
 
+    z1, z2, z3, z4 = st.columns(4)
+    with z1:
+        st.metric("0–6 ft", f"{zone_stats['inside6']['made']}/{zone_stats['inside6']['attempts']}", f"{zone_stats['inside6']['pct']:.1f}%")
+    with z2:
+        st.metric("6–10 ft", f"{zone_stats['six10']['made']}/{zone_stats['six10']['attempts']}", f"{zone_stats['six10']['pct']:.1f}%")
+    with z3:
+        st.metric("10–20 ft", f"{zone_stats['ten20']['made']}/{zone_stats['ten20']['attempts']}", f"{zone_stats['ten20']['pct']:.1f}%")
+    with z4:
+        st.metric("Lag Putts 20+ ft", f"{zone_stats['lag20']['attempts']} tries", f"3P {zone_stats['lag20']['three_putt_pct']:.1f}%")
+
     putt_impact = build_putting_round_impact(round_data, benchmark_df_putt)
     total_putts_round = int(pd.to_numeric(_safe_col(round_data, "Putts", 0), errors="coerce").fillna(0).sum())
     three_putts_round = int((pd.to_numeric(_safe_col(round_data, "Putts", 0), errors="coerce").fillna(0) >= 3).sum())
+    round_holes_played = int(len(round_data)) if round_data is not None else 0
+    three_putt_pct_round = (three_putts_round / round_holes_played * 100.0) if round_holes_played else 0.0
     sg_color = "#64dfb5" if putt_impact["sg_putting"] >= 0 else "#ee6c4d"
+
+    compare_label = _baseline_label(compare_mode_putt)
+    compare_label_per18 = _baseline_label(compare_mode_putt, per18=True)
+
+    total_putts_delta = total_putts_round - baseline_putt["total_putts_per18"]
+    one_putt_delta = putt_impact["pct"] - baseline_putt["one_putt_pct"]
+    three_putts_delta = three_putts_round - baseline_putt["three_putts_per18"]
+    total_putts_arrow = _delta_arrow(total_putts_delta, higher_better=False, tol=0.1)
+    one_putt_arrow = _delta_arrow(one_putt_delta, higher_better=True, tol=0.25)
+    three_putts_arrow = _delta_arrow(three_putts_delta, higher_better=False, tol=0.1)
 
     st.markdown(
         f"""
-        <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
+        <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.6;">
           <b>🧾 Putting Round Summary</b><br>
-          Total Putts: {total_putts_round}<br>
-          1-Putts: {putt_impact['made']}/{putt_impact['attempts']} ({putt_impact['pct']:.1f}%)<br>
-          3-Putts: {three_putts_round}<br>
-          Putting SG vs {compare_mode_putt}: <span style="font-weight:800; color:{sg_color};">{putt_impact['sg_putting']:+.2f}</span>
+          Total Putts: {total_putts_round} <span style="color:#aaa;">vs {baseline_putt['total_putts_per18']:.1f} {compare_label_per18}</span> {total_putts_arrow}<br>
+          1-Putts: {putt_impact['made']}/{putt_impact['attempts']} ({putt_impact['pct']:.1f}%) <span style="color:#aaa;">vs {baseline_putt['one_putt_pct']:.1f}% {compare_label}</span> {one_putt_arrow}<br>
+          3-Putts: {three_putts_round}/{round_holes_played} ({three_putt_pct_round:.1f}%) <span style="color:#aaa;">vs {baseline_putt['three_putts_per18']:.1f} {compare_label_per18} • {baseline_putt['three_putt_pct']:.1f}% {compare_label}</span> {three_putts_arrow}<br>
+          Putting SG vs {compare_label}: <span style="font-weight:800; color:{sg_color};">{putt_impact['sg_putting']:+.2f}</span>
           <span style="color:#aaa;">(Expected Makes: {putt_impact['expected_makes']:.1f} | Actual Makes: {putt_impact['actual_makes']:.0f})</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    st.markdown("#### Putting Skill Fingerprint")
+    fingerprint_df = build_putting_skill_fingerprint(round_data)
+    bench_fingerprint_df = build_putting_skill_fingerprint(benchmark_df_putt)
+    if not fingerprint_df.empty:
+        fingerprint_long = build_compare_long(
+            fingerprint_df.rename(columns={"OnePutt": "Made", "MakePct": "Pct", "DisplayLabel": "Label"})[["Bucket", "Attempts", "Made", "Pct", "Label"]],
+            bench_fingerprint_df.rename(columns={"OnePutt": "Made", "MakePct": "Pct", "DisplayLabel": "Label"})[["Bucket", "Attempts", "Made", "Pct", "Label"]] if not bench_fingerprint_df.empty else pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "Label"]),
+            "Bucket", round_label="Round", bench_label=compare_mode_putt
+        )
+        render_paired_compare_bars(fingerprint_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode_putt, "Distance Range", "1-Putt %")
+
+        fp_table = pd.merge(
+            fingerprint_df[["Bucket", "Attempts", "OnePutt", "TwoPutt", "ThreePuttPlus", "MakePct", "TwoPuttPct", "ThreePuttPct", "AvgStartFt"]],
+            bench_fingerprint_df[["Bucket", "MakePct", "ThreePuttPct"]].rename(columns={"MakePct": f"{compare_mode_putt} 1-Putt %", "ThreePuttPct": f"{compare_mode_putt} 3-Putt %"}),
+            on="Bucket",
+            how="left"
+        )
+        fp_table["Δ 1-Putt %"] = (pd.to_numeric(fp_table["MakePct"], errors="coerce").fillna(0) - pd.to_numeric(fp_table[f"{compare_mode_putt} 1-Putt %"], errors="coerce").fillna(0)).round(1)
+        fp_table["1P Arrow"] = fp_table["Δ 1-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=True, tol=0.25))
+        fp_table["Δ 3-Putt %"] = (pd.to_numeric(fp_table["ThreePuttPct"], errors="coerce").fillna(0) - pd.to_numeric(fp_table[f"{compare_mode_putt} 3-Putt %"], errors="coerce").fillna(0)).round(1)
+        fp_table["3P Arrow"] = fp_table["Δ 3-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=False, tol=0.25))
+        st.dataframe(
+            fp_table.rename(columns={
+                "OnePutt": "1-Putts",
+                "TwoPutt": "2-Putts",
+                "ThreePuttPlus": "3-Putts+",
+                "MakePct": "Round 1-Putt %",
+                "TwoPuttPct": "Round 2-Putt %",
+                "ThreePuttPct": "Round 3-Putt %",
+                "AvgStartFt": "Avg Start Ft",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if finger_insights:
+            st.markdown(
+                f"""
+                <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
+                  <b>🧬 Putting Fingerprint Notes</b><br>
+                  {'<br>'.join(finger_insights)}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No usable putting fingerprint data found for this round.")
+
+    st.markdown("#### Lag Putting (20+ ft)")
+    lag = zone_stats["lag20"]
+    lag_attempts_delta = lag["attempts"] - baseline_putt["lag_attempts_avg"]
+    lag_start_delta = lag["avg_start_ft"] - baseline_putt["lag_avg_start_ft"]
+    lag_two_putt_delta = lag["two_putt_or_better_pct"] - baseline_putt["lag_two_putt_or_better_pct"]
+    lag_three_putt_delta = lag["three_putt_pct"] - baseline_putt["lag_three_putt_pct"]
+    st.markdown(
+        f"""
+        <div style="margin-top:4px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.6;">
+          <b>Lag Putting Snapshot</b><br>
+          Attempts: {lag['attempts']} <span style="color:#aaa;">vs {baseline_putt['lag_attempts_avg']:.1f} {compare_label}</span> {_delta_arrow(lag_attempts_delta, higher_better=False, tol=0.1)}<br>
+          Avg start length: {lag['avg_start_ft']:.1f} ft <span style="color:#aaa;">vs {baseline_putt['lag_avg_start_ft']:.1f} ft {compare_label}</span> {_delta_arrow(lag_start_delta, higher_better=False, tol=0.25)}<br>
+          2-putt or better: {lag['two_putt_or_better_pct']:.1f}% <span style="color:#aaa;">vs {baseline_putt['lag_two_putt_or_better_pct']:.1f}% {compare_label}</span> {_delta_arrow(lag_two_putt_delta, higher_better=True, tol=0.25)}<br>
+          3-putt rate: {lag['three_putt_pct']:.1f}% <span style="color:#aaa;">vs {baseline_putt['lag_three_putt_pct']:.1f}% {compare_label}</span> {_delta_arrow(lag_three_putt_delta, higher_better=False, tol=0.25)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### 3-Putts by Starting Distance")
+    round_three_putt_bucket = summarize_three_putt_by_bucket(round_data)
+    bench_three_putt_bucket = summarize_three_putt_by_bucket(benchmark_df_putt)
+    three_putt_long = build_compare_long(round_three_putt_bucket, bench_three_putt_bucket, "Bucket", round_label="Round", bench_label=compare_mode_putt)
+    if not three_putt_long.empty:
+        render_paired_compare_bars(three_putt_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode_putt, "Putt Range", "3-Putt %")
+        three_putt_table = pd.merge(
+            round_three_putt_bucket.rename(columns={"Attempts": "Round Attempts", "Made": "Round 3-Putts", "Pct": "Round 3-Putt %"}),
+            bench_three_putt_bucket.rename(columns={"Attempts": f"{compare_mode_putt} Attempts", "Made": f"{compare_mode_putt} 3-Putts", "Pct": f"{compare_mode_putt} 3-Putt %"}),
+            on="Bucket",
+            how="outer"
+        ).sort_values("Bucket")
+        three_putt_table["Δ 3-Putt %"] = (pd.to_numeric(three_putt_table["Round 3-Putt %"], errors="coerce").fillna(0) - pd.to_numeric(three_putt_table[f"{compare_mode_putt} 3-Putt %"], errors="coerce").fillna(0)).round(1)
+        three_putt_table["Arrow"] = three_putt_table["Δ 3-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=False, tol=0.25))
+        st.dataframe(three_putt_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("No usable 3-putt distance data found for this round / comparison group.")
 
     st.markdown("#### Putts by Starting Distance (1-Putt %)")
     round_putt_bucket = summarize_putting_by_bucket(round_data)
@@ -3662,6 +4082,8 @@ with tab_putting:
             on="Bucket",
             how="outer"
         ).sort_values("Bucket")
+        putt_table["Δ 1-Putt %"] = (pd.to_numeric(putt_table["Round 1-Putt %"], errors="coerce").fillna(0) - pd.to_numeric(putt_table[f"{compare_mode_putt} 1-Putt %"], errors="coerce").fillna(0)).round(1)
+        putt_table["Arrow"] = putt_table["Δ 1-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=True, tol=0.25))
         st.dataframe(putt_table, use_container_width=True, hide_index=True)
     else:
         st.info("No usable putting bucket data found for this round / comparison group.")
@@ -3704,18 +4126,11 @@ with tab_shortgame:
     bench_made = int(bench_sg["SG OnePutt"].sum()) if not bench_sg.empty else 0
     bench_pct = (bench_made / bench_attempts * 100) if bench_attempts else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Round SG Attempts", round_attempts)
-    with c2:
-        st.metric("Round 1-Putt Saves", f"{round_made}/{round_attempts}", f"{round_pct:.1f}%")
-    with c3:
-        st.metric(f"{compare_mode_sg} SG Attempts", bench_attempts)
-    with c4:
-        st.metric(f"{compare_mode_sg} 1-Putt Saves", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
-
     sg_extra = build_short_game_extra_stats(round_data)
     sg_bench = build_short_game_extra_stats(benchmark_df_sg) if "benchmark_df_sg" in locals() else {"holes_2plus":0,"opportunities":0}
+    sg_prox = build_short_game_proximity_stats(round_data)
+    sg_bogey = build_bogey_avoidance_stats(round_data)
+    sg_insights = build_short_game_insights(round_data)
 
     round_2plus_pct = (sg_extra["holes_2plus"] / sg_extra["opportunities"]) if sg_extra["opportunities"] else 0
     bench_2plus_pct = (sg_bench["holes_2plus"] / sg_bench["opportunities"]) if sg_bench["opportunities"] else 0
@@ -3728,26 +4143,45 @@ with tab_shortgame:
     bench_updowns_ops = int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up and Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up and Down Opportunity" in benchmark_df_sg else int(pd.to_numeric(_safe_col(benchmark_df_sg, "Up & Down Opportunity", 0), errors="coerce").fillna(0).sum()) if "Up & Down Opportunity" in benchmark_df_sg else bench_attempts
     bench_updowns_pct = (bench_updowns_made / bench_updowns_ops * 100.0) if bench_updowns_ops else 0.0
 
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Round SG Attempts", round_attempts)
+    with c2:
+        st.metric("Round 1-Putt Saves", f"{round_made}/{round_attempts}", f"{round_pct:.1f}%")
+    with c3:
+        st.metric(f"{compare_mode_sg} SG Attempts", bench_attempts)
+    with c4:
+        st.metric(f"{compare_mode_sg} 1-Putt Saves", f"{bench_made}/{bench_attempts}", f"{bench_pct:.1f}%")
+
     c5, c6, c7, c8 = st.columns(4)
     with c5:
-        st.metric("Total Chips", sg_extra["total_chips"])
+        st.metric("Avg Leave Distance", f"{sg_prox['avg_leave_ft']:.1f} ft")
     with c6:
-        st.metric(
-            "Chips / Holes Available",
-            f'{sg_extra["total_chips"]}/{sg_extra["opportunities"]}',
-            f'{sg_extra["chips_per_hole"]:.1f}'
-        )
+        st.metric("Inside 6 ft", f"{sg_prox['inside6']}/{sg_prox['attempts']}", f"{sg_prox['inside6_pct']:.1f}%")
     with c7:
-        st.metric(
-            "Holes w/ 2+ Chips",
-            f'{sg_extra["holes_2plus"]}/{sg_extra["opportunities"]} ({round_2plus_pct*100:.1f}%)',
-            f'{-delta_2plus:+.1f}% vs avg'
-        )
+        st.metric("Inside 10 ft Conversion", f"{sg_prox['convert_inside10']}/{sg_prox['inside10']}", f"{sg_prox['convert_inside10_pct']:.1f}%")
     with c8:
-        st.metric(
-            "Up & Down %",
-            f"{updowns_made}/{updowns_ops} ({updowns_pct:.1f}%)",
-            f"{(updowns_pct - bench_updowns_pct):+.1f}% vs avg"
+        st.metric("Bogey Avoidance", f"{sg_bogey['par_or_better']}/{sg_bogey['attempts']}", f"{sg_bogey['par_or_better_pct']:.1f}%")
+
+    c9, c10, c11, c12 = st.columns(4)
+    with c9:
+        st.metric("Total Chips", sg_extra["total_chips"])
+    with c10:
+        st.metric("Chips / Holes Available", f'{sg_extra["total_chips"]}/{sg_extra["opportunities"]}', f'{sg_extra["chips_per_hole"]:.1f}')
+    with c11:
+        st.metric("Holes w/ 2+ Chips", f'{sg_extra["holes_2plus"]}/{sg_extra["opportunities"]} ({round_2plus_pct*100:.1f}%)', f'{-delta_2plus:+.1f}% vs avg')
+    with c12:
+        st.metric("Up & Down %", f"{updowns_made}/{updowns_ops} ({updowns_pct:.1f}%)", f"{(updowns_pct - bench_updowns_pct):+.1f}% vs avg")
+
+    if sg_insights:
+        st.markdown(
+            f"""
+            <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
+              <b>🧠 Short Game Notes</b><br>
+              {'<br>'.join(sg_insights)}
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     st.markdown("#### Chipping Inside Leave Distances")
