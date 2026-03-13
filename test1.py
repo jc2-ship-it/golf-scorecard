@@ -379,8 +379,14 @@ def summarize_approach_by_club(frame, min_attempts=1):
          .rename(columns={"Approach Club": "Club"})
     )
     out = out[out["Attempts"] >= min_attempts].copy()
-    out["Pct"] = (out["Made"] / out["Attempts"] * 100).round(1)
-    out["Label"] = out.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {r['Pct']:.1f}%", axis=1)
+    out["Pct"] = (pd.to_numeric(out["Made"], errors="coerce").fillna(0) / pd.to_numeric(out["Attempts"], errors="coerce").replace(0, pd.NA) * 100).fillna(0).round(1)
+    out["Label"] = (
+        pd.to_numeric(out["Made"], errors="coerce").fillna(0).astype(int).astype(str)
+        + "/"
+        + pd.to_numeric(out["Attempts"], errors="coerce").fillna(0).astype(int).astype(str)
+        + " • "
+        + out["Pct"].map(lambda x: f"{float(x):.1f}%")
+    )
     return out.sort_values(["Attempts", "Pct", "Club"], ascending=[False, False, True]).reset_index(drop=True)[["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"]]
 
 def summarize_approach_miss_direction(frame):
@@ -636,6 +642,215 @@ def summarize_three_putt_by_bucket(frame):
     out["Label"] = out.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {r['Pct']:.1f}%", axis=1)
     out["Bucket"] = pd.Categorical(out["Bucket"], categories=PUTT_BUCKET_ORDER, ordered=True)
     return out.sort_values("Bucket").reset_index(drop=True)[["Bucket", "Attempts", "Made", "Pct", "Label"]]
+
+
+
+def render_putting_overlay_line_chart(primary_df, overlay_df, bucket_order, title, value_col="Pct", primary_name="You", overlay_name="Overlay"):
+    if primary_df is None or primary_df.empty:
+        st.info(f"No usable {title.lower()} data found.")
+        return
+
+    p = primary_df.copy()
+    p = p[p["Bucket"].notna()].copy()
+    p["Bucket"] = p["Bucket"].astype(str)
+    p["Value"] = pd.to_numeric(p[value_col], errors="coerce").fillna(0.0)
+    p["Series"] = primary_name
+
+    frames = [p[["Bucket", "Value", "Series"]].copy()]
+    if overlay_df is not None and not overlay_df.empty:
+        o = overlay_df.copy()
+        o = o[o["Bucket"].notna()].copy()
+        o["Bucket"] = o["Bucket"].astype(str)
+        o["Value"] = pd.to_numeric(o[value_col], errors="coerce").fillna(0.0)
+        o["Series"] = overlay_name
+        frames.append(o[["Bucket", "Value", "Series"]].copy())
+
+    plot_df = pd.concat(frames, ignore_index=True)
+    plot_df["Bucket"] = pd.Categorical(plot_df["Bucket"], categories=bucket_order, ordered=True)
+    plot_df = plot_df.sort_values(["Bucket", "Series"]).copy()
+
+    chart = (
+        alt.Chart(plot_df)
+        .mark_line(point=True, strokeWidth=3)
+        .encode(
+            x=alt.X("Bucket:N", sort=bucket_order, title=None),
+            y=alt.Y("Value:Q", title="%"),
+            color=alt.Color("Series:N", title="Overlay"),
+            tooltip=[
+                alt.Tooltip("Bucket:N", title="Bucket"),
+                alt.Tooltip("Series:N", title="Series"),
+                alt.Tooltip("Value:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(height=320, title=title)
+        .configure_view(strokeOpacity=0)
+        .configure_axis(
+            labelColor="white",
+            titleColor="white",
+            gridColor="rgba(255,255,255,0.10)",
+            tickColor="rgba(255,255,255,0.20)",
+            domainColor="rgba(255,255,255,0.20)",
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def render_putting_distance_line_chart(summary_df, bucket_order, title, value_col="Pct", made_col="Made", attempts_col="Attempts", value_label="%", good_metric=True):
+    if summary_df is None or summary_df.empty:
+        st.info(f"No usable {title.lower()} data found.")
+        return
+
+    plot_df = summary_df.copy()
+    plot_df = plot_df[plot_df["Bucket"].notna()].copy()
+    if plot_df.empty:
+        st.info(f"No usable {title.lower()} data found.")
+        return
+
+    plot_df["Bucket"] = pd.Categorical(plot_df["Bucket"].astype(str), categories=bucket_order, ordered=True)
+    plot_df = plot_df.sort_values("Bucket").copy()
+    plot_df["Value"] = pd.to_numeric(plot_df[value_col], errors="coerce").fillna(0.0)
+    plot_df["MadeN"] = pd.to_numeric(plot_df[made_col], errors="coerce").fillna(0).astype(int)
+    plot_df["AttemptsN"] = pd.to_numeric(plot_df[attempts_col], errors="coerce").fillna(0).astype(int)
+    plot_df["Label"] = plot_df.apply(
+        lambda r: f"{int(r['MadeN'])}/{int(r['AttemptsN'])} {float(r['Value']):.1f}%" if int(r["AttemptsN"]) else "—",
+        axis=1
+    )
+
+    bar_color = "#3B82F6" if good_metric else "#EF4444"
+    line_color = "#22C55E" if good_metric else "#F97316"
+
+    base = alt.Chart(plot_df).encode(
+        x=alt.X("Bucket:N", sort=bucket_order, title=None),
+        tooltip=[
+            alt.Tooltip("Bucket:N", title="Bucket"),
+            alt.Tooltip("Value:Q", title=value_label, format=".1f"),
+            alt.Tooltip("MadeN:Q", title="Makes", format=",.0f"),
+            alt.Tooltip("AttemptsN:Q", title="Attempts", format=",.0f"),
+        ],
+    )
+
+    bars = base.mark_bar(
+        cornerRadiusTopLeft=7,
+        cornerRadiusTopRight=7,
+        opacity=0.92,
+    ).encode(
+        y=alt.Y("AttemptsN:Q", title="Attempts"),
+        color=alt.value(bar_color),
+    )
+
+    line = base.mark_line(strokeWidth=4, opacity=0.92).encode(
+        y=alt.Y("Value:Q", title=value_label, axis=alt.Axis(orient="right")),
+        color=alt.value(line_color),
+    )
+
+    points = base.mark_point(size=140, filled=True, opacity=0.97).encode(
+        y=alt.Y("Value:Q", axis=alt.Axis(orient="right")),
+        color=alt.value(line_color),
+    )
+
+    labels = base.mark_text(
+        dx=10,
+        dy=-8,
+        fontSize=12,
+        fontWeight="bold",
+        color="white"
+    ).encode(
+        y=alt.Y("Value:Q", axis=alt.Axis(orient="right")),
+        text="Label:N"
+    )
+
+    chart = alt.layer(bars, line, points, labels).resolve_scale(
+        y="independent"
+    ).properties(height=380, title=title).configure_view(
+        strokeOpacity=0
+    ).configure_axis(
+        labelColor="white",
+        titleColor="white",
+        gridColor="rgba(255,255,255,0.10)",
+        tickColor="rgba(255,255,255,0.20)",
+        domainColor="rgba(255,255,255,0.20)",
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
+
+
+def build_overview_snapshot(frame):
+    d = frame.copy()
+    holes = int(len(d))
+    score = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+    par = pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+    putts = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0)
+    gir = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0)
+
+    fw_block = d[pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0).isin([4, 5])].copy()
+    fw = pd.to_numeric(_safe_col(fw_block, "Fairway", 0), errors="coerce").fillna(0) if not fw_block.empty else pd.Series(dtype=float)
+
+    scramble_made = pd.to_numeric(_safe_col(d, "Scramble", 0), errors="coerce").fillna(0).sum()
+    scramble_ops = pd.to_numeric(_safe_col(d, "Scramble Opportunity", 0), errors="coerce").fillna(0).sum()
+    updown_made = (((gir == 0) & (putts == 1)).sum())
+
+    avg_prox = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", 0), errors="coerce").replace(0, pd.NA).mean()
+    lost_balls = (
+        pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0).sum()
+    )
+    arnies = pd.to_numeric(_safe_col(d, "Arnie", 0), errors="coerce").fillna(0).sum()
+    seves = pd.to_numeric(_safe_col(d, "Seve", 0), errors="coerce").fillna(0).sum()
+
+    total_score = float(score.sum())
+
+    par3_scores = pd.to_numeric(d.loc[par == 3, "Hole Score"], errors="coerce").dropna()
+    par4_scores = pd.to_numeric(d.loc[par == 4, "Hole Score"], errors="coerce").dropna()
+    par5_scores = pd.to_numeric(d.loc[par == 5, "Hole Score"], errors="coerce").dropna()
+
+    avg_par3 = float(par3_scores.mean()) if len(par3_scores) else 0.0
+    avg_par4 = float(par4_scores.mean()) if len(par4_scores) else 0.0
+    avg_par5 = float(par5_scores.mean()) if len(par5_scores) else 0.0
+    weighted_score_per18 = (4 * avg_par3) + (10 * avg_par4) + (4 * avg_par5)
+
+    return {
+        "holes": holes,
+        "total_score": total_score,
+        "score_per18": weighted_score_per18,
+        "putts_per18": _per18(float(putts.sum()), holes),
+        "gir_pct": (float(gir.sum()) / holes * 100.0) if holes else 0.0,
+        "fw_pct": (float(fw.sum()) / len(fw) * 100.0) if len(fw) else 0.0,
+        "scramble_pct": (float(scramble_made) / float(scramble_ops) * 100.0) if scramble_ops else 0.0,
+        "updown_pct": (float(updown_made) / float(scramble_ops) * 100.0) if scramble_ops else 0.0,
+        "arnies_per18": _per18(float(arnies), holes),
+        "seves_per18": _per18(float(seves), holes),
+        "avg_prox": float(avg_prox) if pd.notna(avg_prox) else 0.0,
+        "lost_balls_per18": _per18(float(lost_balls), holes),
+    }
+
+    score = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0).sum()
+    putts = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0).sum()
+    gir = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0)
+    par = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+    fw = pd.to_numeric(_safe_col(d, "Fairway", 0), errors="coerce").fillna(0)
+    fw_block = d[par.isin([4, 5])] if "Par" in d.columns else d.iloc[0:0]
+    fw_att = int(len(fw_block))
+    fw_made = pd.to_numeric(_safe_col(fw_block, "Fairway", 0), errors="coerce").fillna(0).sum() if fw_att else 0
+
+    scramble_made = pd.to_numeric(_safe_col(d, "Scramble", 0), errors="coerce").fillna(0).sum()
+    scramble_att = pd.to_numeric(_safe_col(d, "Scramble Opportunity", 0), errors="coerce").fillna(0).sum()
+    up_made = (((pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0) == 0) & (pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0) == 1)).sum())
+    up_att = scramble_att
+    prox = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", pd.NA), errors="coerce")
+    prox_avg = float(prox.dropna().mean()) if prox.notna().any() else 0.0
+    lost_balls = pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0).sum() + pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0).sum()
+
+    return {
+        "holes": holes,
+        "score_per18": float(score) / holes * 18.0,
+        "putts_per18": float(putts) / holes * 18.0,
+        "gir_pct": float(gir.sum()) / holes * 100.0 if holes else 0.0,
+        "fw_pct": float(fw_made) / fw_att * 100.0 if fw_att else 0.0,
+        "scramble_pct": float(scramble_made) / scramble_att * 100.0 if scramble_att else 0.0,
+        "updown_pct": float(up_made) / up_att * 100.0 if up_att else 0.0,
+        "avg_prox": prox_avg,
+        "lost_balls_per18": float(lost_balls) / holes * 18.0,
+    }
 
 
 def build_putting_fingerprint_insights(frame):
@@ -2192,7 +2407,7 @@ def build_filtered_approach_proximity_distribution(frame):
     return out.sort_values("Bucket").reset_index(drop=True)
 
 
-def apply_approach_filters(frame, yard_buckets=None, clubs=None, courses=None, fairway_vals=None, par_vals=None):
+def apply_approach_filters(frame, yard_buckets=None, clubs=None, courses=None, fairway_vals=None, par_vals=None, gir_mode="All"):
     d = prepare_approach_frame(frame).copy()
     if d.empty:
         return d
@@ -2209,6 +2424,10 @@ def apply_approach_filters(frame, yard_buckets=None, clubs=None, courses=None, f
     if par_vals is not None and len(par_vals) > 0:
         par_num = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
         d = d[par_num.isin(par_vals)].copy()
+    if gir_mode == "GIR Only":
+        d = d[pd.to_numeric(_safe_col(d, "Approach GIR Flag", 0), errors="coerce").fillna(0).astype(int) == 1].copy()
+    elif gir_mode == "Missed GIR Only":
+        d = d[pd.to_numeric(_safe_col(d, "Approach GIR Flag", 0), errors="coerce").fillna(0).astype(int) == 0].copy()
     return d
 
 def build_approach_proximity_compare(round_filtered, bench_filtered):
@@ -3027,38 +3246,1140 @@ curr_fw = fw_pct_num
 # =========================================================
 st.markdown("🏌️ *“Arnie steps to the tee with precision in mind. Seve follows, carving creativity from the rough.”*", unsafe_allow_html=True)
 
+
+def build_overview_metric_rows(round_overview, base_overview, compare_label):
+    rows = [
+        {"Metric": "Avg Score / 18", "Round": round_overview["score_per18"], "Baseline": base_overview["score_per18"], "Better": "Lower", "Fmt": "{:.1f}"},
+        {"Metric": "Putts / 18", "Round": round_overview["putts_per18"], "Baseline": base_overview["putts_per18"], "Better": "Lower", "Fmt": "{:.1f}"},
+        {"Metric": "GIR %", "Round": round_overview["gir_pct"], "Baseline": base_overview["gir_pct"], "Better": "Higher", "Fmt": "{:.1f}%"},
+        {"Metric": "Fairway %", "Round": round_overview["fw_pct"], "Baseline": base_overview["fw_pct"], "Better": "Higher", "Fmt": "{:.1f}%"},
+        {"Metric": "Scramble %", "Round": round_overview["scramble_pct"], "Baseline": base_overview["scramble_pct"], "Better": "Higher", "Fmt": "{:.1f}%"},
+        {"Metric": "Up & Down %", "Round": round_overview["updown_pct"], "Baseline": base_overview["updown_pct"], "Better": "Higher", "Fmt": "{:.1f}%"},
+        {"Metric": "Arnies / 18", "Round": round_overview["arnies_per18"], "Baseline": base_overview["arnies_per18"], "Better": "Higher", "Fmt": "{:.2f}"},
+        {"Metric": "Seves / 18", "Round": round_overview["seves_per18"], "Baseline": base_overview["seves_per18"], "Better": "Higher", "Fmt": "{:.2f}"},
+        {"Metric": "Avg First-Putt Proximity", "Round": round_overview["avg_prox"], "Baseline": base_overview["avg_prox"], "Better": "Lower", "Fmt": "{:.1f} ft"},
+        {"Metric": "Lost Balls / 18", "Round": round_overview["lost_balls_per18"], "Baseline": base_overview["lost_balls_per18"], "Better": "Lower", "Fmt": "{:.2f}"},
+    ]
+    out = pd.DataFrame(rows)
+    out["Compare Label"] = compare_label
+    out["Delta"] = out["Round"] - out["Baseline"]
+    out["Arrow"] = out.apply(lambda r: _delta_arrow(r["Delta"], higher_better=(r["Better"] == "Higher"), tol=0.05), axis=1)
+    out["GoodDelta"] = out.apply(lambda r: (r["Baseline"] - r["Round"]) if r["Better"] == "Lower" else (r["Round"] - r["Baseline"]), axis=1)
+    out["Round Display"] = out.apply(lambda r: r["Fmt"].format(r["Round"]), axis=1)
+    out["Baseline Display"] = out.apply(lambda r: r["Fmt"].format(r["Baseline"]), axis=1)
+    out["Delta Display"] = out.apply(
+        lambda r: (f'{r["Arrow"]} {r["Delta"]:+.1f}%' if "%" in r["Fmt"] else (f'{r["Arrow"]} {r["Delta"]:+.1f} ft' if "ft" in r["Fmt"] else f'{r["Arrow"]} {r["Delta"]:+.2f}' if ".2f" in r["Fmt"] else f'{r["Arrow"]} {r["Delta"]:+.1f}')),
+        axis=1
+    )
+    return out
+
+
+def render_overview_cards(metric_df, compare_label):
+    import streamlit.components.v1 as components
+
+    html = """
+    <style>
+      .ov-wrap {
+        display:grid;
+        grid-template-columns:repeat(4, minmax(180px,1fr));
+        gap:12px;
+        margin:4px 0 10px 0;
+        font-family:Segoe UI, Roboto, Arial, sans-serif;
+      }
+      .ov-card {
+        background:linear-gradient(180deg,#2b2b2b 0%, #222 100%);
+        border:1px solid rgba(255,255,255,.08);
+        border-radius:14px;
+        padding:12px 14px;
+        box-shadow:0 8px 18px rgba(0,0,0,.18);
+      }
+      .ov-k {
+        font-size:12px;
+        color:#a9a9a9;
+        margin-bottom:6px;
+        font-weight:700;
+      }
+      .ov-v {
+        font-size:26px;
+        color:#fff;
+        font-weight:800;
+        line-height:1.05;
+        margin-bottom:6px;
+      }
+      .ov-b {
+        font-size:12px;
+        color:#bdbdbd;
+        margin-bottom:4px;
+      }
+      .ov-d {
+        font-size:12px;
+        font-weight:800;
+      }
+      .ov-good {color:#64dfb5;}
+      .ov-bad {color:#ee6c4d;}
+      .ov-flat {color:#bdbdbd;}
+    </style>
+    <div class="ov-wrap">
+    """
+
+    for _, r in metric_df.iterrows():
+        cls = "ov-good" if r["GoodDelta"] > 0.05 else ("ov-bad" if r["GoodDelta"] < -0.05 else "ov-flat")
+        html += f"""
+        <div class="ov-card">
+          <div class="ov-k">{r["Metric"]}</div>
+          <div class="ov-v">{r["Round Display"]}</div>
+          <div class="ov-b">vs {compare_label}: {r["Baseline Display"]}</div>
+          <div class="ov-d {cls}">{r["Delta Display"]}</div>
+        </div>
+        """
+
+    html += "</div>"
+
+    n_cards = max(len(metric_df), 1)
+    n_rows = (n_cards + 3) // 4
+    height_px = 115 * n_rows + 20
+
+    components.html(html, height=height_px, scrolling=False)
+
+
+def render_overview_delta_chart(metric_df, compare_label):
+    plot_df = metric_df.copy()
+    plot_df["ColorKey"] = plot_df["GoodDelta"].apply(lambda x: "Better" if x > 0.05 else ("Worse" if x < -0.05 else "Flat"))
+    plot_df["SignedLabel"] = plot_df["GoodDelta"].apply(lambda x: f"{x:+.1f}")
+    chart = alt.Chart(plot_df).mark_bar(cornerRadius=8).encode(
+        y=alt.Y("Metric:N", sort=alt.EncodingSortField(field="GoodDelta", op="sum", order="descending"), title=None),
+        x=alt.X("GoodDelta:Q", title=f"Improvement vs {compare_label}"),
+        color=alt.Color("ColorKey:N", scale=alt.Scale(domain=["Better","Flat","Worse"], range=["#64dfb5","#9aa0a6","#ee6c4d"]), legend=None),
+        tooltip=[
+            alt.Tooltip("Metric:N"),
+            alt.Tooltip("Round Display:N", title="Round"),
+            alt.Tooltip("Baseline Display:N", title=compare_label),
+            alt.Tooltip("Delta Display:N", title="Change"),
+        ],
+    )
+    labels = alt.Chart(plot_df).mark_text(align="left", dx=6, fontWeight="bold", color="white").encode(
+        y=alt.Y("Metric:N", sort=alt.EncodingSortField(field="GoodDelta", op="sum", order="descending")),
+        x=alt.X("GoodDelta:Q"),
+        text="SignedLabel:N",
+    )
+    st.altair_chart((chart + labels).properties(height=340).configure_view(strokeOpacity=0), use_container_width=True)
+
+
+
+def build_score_mix_summary(frame):
+    d = frame.copy()
+    if d.empty or "Score Label" not in d.columns:
+        return {
+            "score_df": pd.DataFrame(columns=["Category", "Count", "Percent"]),
+            "cat_df": pd.DataFrame(columns=["Category", "Count", "Percent"]),
+        }
+
+    score_order = ["Eagle", "Birdie", "Par", "Bogey", "Double Bogey", "Triple Bogey +"]
+    score_counts = d["Score Label"].value_counts()
+
+    score_df = pd.DataFrame({
+        "Category": score_order,
+        "Count": [int(score_counts.get(k, 0)) for k in score_order],
+    })
+    total = max(int(score_df["Count"].sum()), 1)
+    score_df["Percent"] = score_df["Count"] / total * 100.0
+
+    def _score_bucket(x):
+        if x in ["Albatross", "Eagle", "Birdie", "Par"]:
+            return "Par or Better"
+        if x == "Bogey":
+            return "Bogey"
+        return "Double+"
+
+    cat_counts = d["Score Label"].fillna("").apply(_score_bucket).value_counts()
+    cat_order = ["Par or Better", "Bogey", "Double+"]
+    cat_df = pd.DataFrame({
+        "Category": cat_order,
+        "Count": [int(cat_counts.get(k, 0)) for k in cat_order],
+    })
+    cat_total = max(int(cat_df["Count"].sum()), 1)
+    cat_df["Percent"] = cat_df["Count"] / cat_total * 100.0
+
+    return {"score_df": score_df, "cat_df": cat_df}
+
+
+def _build_segment_row_html(series_name, df_block, color_map, total_count):
+    if df_block is None or df_block.empty:
+        return f"""
+        <div class="mix-row">
+          <div class="mix-series">{series_name}</div>
+          <div class="mix-bar-wrap"><div class="mix-bar-bg"></div></div>
+          <div class="mix-total">0 holes</div>
+        </div>
+        """
+
+    parts_html = ""
+    legend_html = ""
+    for _, r in df_block.iterrows():
+        cat = str(r["Category"])
+        count = int(pd.to_numeric(r["Count"], errors="coerce") or 0)
+        pct = float(pd.to_numeric(r["Percent"], errors="coerce") or 0.0)
+        color = color_map.get(cat, "#777")
+        label = f"{cat}: {count} ({pct:.1f}%)"
+        parts_html += f'<div class="mix-seg" style="width:{pct:.4f}%; background:{color};" title="{label}"></div>'
+        legend_html += f'<div class="mix-legend-item"><span class="mix-dot" style="background:{color};"></span>{cat}: {count} ({pct:.1f}%)</div>'
+
+    return f"""
+    <div class="mix-row">
+      <div class="mix-series">{series_name}</div>
+      <div class="mix-bar-wrap">
+        <div class="mix-bar-bg">
+          {parts_html}
+        </div>
+      </div>
+      <div class="mix-total">{int(total_count)} holes</div>
+    </div>
+    <div class="mix-legend">{legend_html}</div>
+    """
+
+def render_segmented_score_mix_compare(round_df, base_df, compare_label):
+    color_map = {
+        "Eagle": "#71c7ec",
+        "Birdie": "#64dfb5",
+        "Par": "#c7c7c7",
+        "Bogey": "#f2c14e",
+        "Double Bogey": "#ee6c4d",
+        "Triple Bogey +": "#b23a48",
+    }
+
+    round_total = int(pd.to_numeric(round_df.get("Count", 0), errors="coerce").fillna(0).sum()) if round_df is not None and not round_df.empty else 0
+    base_total = int(pd.to_numeric(base_df.get("Count", 0), errors="coerce").fillna(0).sum()) if base_df is not None and not base_df.empty else 0
+
+    html = """
+    <style>
+      .mix-card {background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:14px 14px 10px 14px; margin-bottom:10px;}
+      .mix-row {display:grid; grid-template-columns:110px 1fr 80px; gap:10px; align-items:center; margin-bottom:8px;}
+      .mix-series {font-size:13px; font-weight:800; color:#fff;}
+      .mix-bar-wrap {position:relative;}
+      .mix-bar-bg {position:relative; display:flex; width:100%; height:28px; overflow:hidden; border-radius:999px; background:#3a3a3a; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);}
+      .mix-seg {height:100%;}
+      .mix-total {font-size:12px; color:#bdbdbd; text-align:right; font-variant-numeric:tabular-nums;}
+      .mix-legend {display:flex; flex-wrap:wrap; gap:6px 12px; margin:8px 0 10px 120px;}
+      .mix-legend-item {font-size:11px; color:#d8d8d8; white-space:nowrap; line-height:1.3;}
+      .mix-dot {display:inline-block; width:10px; height:10px; border-radius:999px; margin-right:6px; vertical-align:middle;}
+      .mix-seg-label {display:none !important;}
+      @media (min-width: 300px) {
+        .mix-seg-label {display:none !important;}
+      }
+    </style>
+    <div class="mix-card">
+    """
+    html += _build_segment_row_html("This Round", round_df, color_map, round_total)
+    html += _build_segment_row_html(compare_label, base_df, color_map, base_total)
+    html += "</div>"
+    import streamlit.components.v1 as components
+    components.html(html, height=190, scrolling=False)
+
+def render_segmented_category_mix_compare(round_df, base_df, compare_label):
+    color_map = {
+        "Par or Better": "#64dfb5",
+        "Bogey": "#f2c14e",
+        "Double+": "#ee6c4d",
+    }
+
+    round_total = int(pd.to_numeric(round_df.get("Count", 0), errors="coerce").fillna(0).sum()) if round_df is not None and not round_df.empty else 0
+    base_total = int(pd.to_numeric(base_df.get("Count", 0), errors="coerce").fillna(0).sum()) if base_df is not None and not base_df.empty else 0
+
+    html = """
+    <style>
+      .mix-card {background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:14px 14px 10px 14px; margin-bottom:10px;}
+      .mix-row {display:grid; grid-template-columns:110px 1fr 80px; gap:10px; align-items:center; margin-bottom:8px;}
+      .mix-series {font-size:13px; font-weight:800; color:#fff;}
+      .mix-bar-wrap {position:relative;}
+      .mix-bar-bg {position:relative; display:flex; width:100%; height:28px; overflow:hidden; border-radius:999px; background:#3a3a3a; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);}
+      .mix-seg {height:100%;}
+      .mix-total {font-size:12px; color:#bdbdbd; text-align:right; font-variant-numeric:tabular-nums;}
+      .mix-legend {display:flex; flex-wrap:wrap; gap:6px 12px; margin:8px 0 10px 120px;}
+      .mix-legend-item {font-size:11px; color:#d8d8d8; white-space:nowrap; line-height:1.3;}
+      .mix-dot {display:inline-block; width:10px; height:10px; border-radius:999px; margin-right:6px; vertical-align:middle;}
+    </style>
+    <div class="mix-card">
+    """
+    html += _build_segment_row_html("This Round", round_df, color_map, round_total)
+    html += _build_segment_row_html(compare_label, base_df, color_map, base_total)
+    html += "</div>"
+    import streamlit.components.v1 as components
+    components.html(html, height=210, scrolling=False)
+
+
+
+
+def render_scorecard_summary_panel(
+    player,
+    course,
+    date,
+    total_score,
+    score_to_par_str,
+    holes_played,
+    putts_per_hole,
+    gir_total,
+    gir_pct_num,
+    fw_total,
+    fw_attempts,
+    fw_pct_num,
+    scrambles_display,
+    updowns_display,
+    us_open_made,
+    us_open_attempts,
+    us_open_pct,
+    avg_par3,
+    avg_par4,
+    avg_par5,
+    total_1_putts,
+    total_3_plus_putts,
+    total_3_putt_bogeys,
+    pro_pars_total,
+    arnies_total,
+    seves_total,
+    hole_outs_total,
+    lost_balls_display,
+    gir3_m, gir3_t, gir3_pct,
+    gir4_m, gir4_t, gir4_pct,
+    gir5_m, gir5_t, gir5_pct,
+    fw4_m, fw4_t, fw4_pct,
+    fw5_m, fw5_t, fw5_pct
+):
+    import streamlit.components.v1 as components
+
+    html = f"""
+    <style>
+      .scsum-wrap {{
+        margin-top: 10px;
+        font-family: Segoe UI, Roboto, Arial, sans-serif;
+      }}
+      .scsum-head {{
+        background: linear-gradient(180deg, #2b2b2b 0%, #222 100%);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.16);
+      }}
+      .scsum-title {{
+        font-size: 18px;
+        font-weight: 800;
+        color: #fff;
+        margin-bottom: 2px;
+      }}
+      .scsum-sub {{
+        font-size: 12px;
+        color: #bdbdbd;
+      }}
+      .scsum-grid {{
+        display:grid;
+        grid-template-columns: repeat(3, minmax(220px, 1fr));
+        gap: 12px;
+      }}
+      .scsum-card {{
+        background: linear-gradient(180deg, #2a2a2a 0%, #202020 100%);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 14px;
+        padding: 12px 14px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.16);
+      }}
+      .scsum-h {{
+        font-size: 13px;
+        font-weight: 800;
+        color: #fff;
+        margin-bottom: 10px;
+      }}
+      .scsum-row {{
+        display:flex;
+        justify-content:space-between;
+        gap: 10px;
+        align-items:flex-start;
+        margin: 6px 0;
+        font-size: 12px;
+        line-height: 1.35;
+      }}
+      .scsum-l {{
+        color:#d7d7d7;
+        font-weight:600;
+      }}
+      .scsum-r {{
+        color:#fff;
+        font-weight:800;
+        text-align:right;
+        font-variant-numeric: tabular-nums;
+      }}
+      .scsum-big {{
+        font-size: 26px;
+        font-weight: 900;
+        color: #fff;
+        margin-bottom: 2px;
+      }}
+      .scsum-muted {{
+        color:#a9a9a9;
+        font-weight:600;
+      }}
+    </style>
+
+    <div class="scsum-wrap">
+      <div class="scsum-head">
+        <div class="scsum-title">{player} • {course}</div>
+        <div class="scsum-sub">{date} • {holes_played} holes</div>
+      </div>
+
+      <div class="scsum-grid">
+        <div class="scsum-card">
+          <div class="scsum-h">🏌️ Round Snapshot</div>
+          <div class="scsum-big">{total_score} <span class="scsum-muted">({score_to_par_str})</span></div>
+          <div class="scsum-row"><div class="scsum-l">Putts / Hole</div><div class="scsum-r">{putts_per_hole:.2f}</div></div>
+          <div class="scsum-row"><div class="scsum-l">GIR</div><div class="scsum-r">{gir_total}/{holes_played} ({gir_pct_num:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">Fairways</div><div class="scsum-r">{fw_total}/{fw_attempts} ({fw_pct_num:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">Scrambles</div><div class="scsum-r">{scrambles_display}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Up & Downs</div><div class="scsum-r">{updowns_display}</div></div>
+          <div class="scsum-row"><div class="scsum-l">US Open Pars</div><div class="scsum-r">{us_open_made}/{us_open_attempts} ({us_open_pct:.1f}%)</div></div>
+        </div>
+
+        <div class="scsum-card">
+          <div class="scsum-h">📈 Scoring Profile</div>
+          <div class="scsum-row"><div class="scsum-l">Par 3 Avg</div><div class="scsum-r">{avg_par3:.1f}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Par 4 Avg</div><div class="scsum-r">{avg_par4:.1f}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Par 5 Avg</div><div class="scsum-r">{avg_par5:.1f}</div></div>
+          <div class="scsum-row"><div class="scsum-l">1-Putts</div><div class="scsum-r">{total_1_putts}</div></div>
+          <div class="scsum-row"><div class="scsum-l">3+ Putts</div><div class="scsum-r">{total_3_plus_putts}</div></div>
+          <div class="scsum-row"><div class="scsum-l">3-Putt Bogeys</div><div class="scsum-r">{total_3_putt_bogeys}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Pro Pars+</div><div class="scsum-r">{pro_pars_total}</div></div>
+        </div>
+
+        <div class="scsum-card">
+          <div class="scsum-h">🎯 Ball Striking + Creativity</div>
+          <div class="scsum-row"><div class="scsum-l">GIR — Par 3</div><div class="scsum-r">{gir3_m}/{gir3_t} ({gir3_pct:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">GIR — Par 4</div><div class="scsum-r">{gir4_m}/{gir4_t} ({gir4_pct:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">GIR — Par 5</div><div class="scsum-r">{gir5_m}/{gir5_t} ({gir5_pct:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">FW — Par 4</div><div class="scsum-r">{fw4_m}/{fw4_t} ({fw4_pct:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">FW — Par 5</div><div class="scsum-r">{fw5_m}/{fw5_t} ({fw5_pct:.1f}%)</div></div>
+          <div class="scsum-row"><div class="scsum-l">Arnies / Seves</div><div class="scsum-r">{arnies_total} / {seves_total}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Hole Outs / Lost Balls</div><div class="scsum-r">{hole_outs_total} / {lost_balls_display}</div></div>
+        </div>
+      </div>
+    </div>
+    """
+    components.html(html, height=360, scrolling=False)
+
+
+def render_overview_category_trends(round_cat_df, base_cat_df):
+    if round_cat_df is None or round_cat_df.empty or base_cat_df is None or base_cat_df.empty:
+        st.info("No category trend data available.")
+        return
+
+    merged = pd.merge(
+        round_cat_df[["Category", "Count", "Percent"]].rename(columns={"Count": "Round Count", "Percent": "Round %"}),
+        base_cat_df[["Category", "Count", "Percent"]].rename(columns={"Count": "Base Count", "Percent": "Base %"}),
+        on="Category",
+        how="outer"
+    ).fillna(0)
+
+    rows_html = ""
+    for _, r in merged.iterrows():
+        cat = str(r["Category"])
+        round_pct = float(pd.to_numeric(r["Round %"], errors="coerce") or 0.0)
+        base_pct = float(pd.to_numeric(r["Base %"], errors="coerce") or 0.0)
+        delta = round_pct - base_pct
+
+        if cat == "Par or Better":
+            good = delta > 0.05
+        else:
+            good = delta < -0.05
+
+        if abs(delta) <= 0.05:
+            arrow = "➡️"
+            cls = "oct-flat"
+        else:
+            arrow = "🔼" if good else "🔽"
+            cls = "oct-good" if good else "oct-bad"
+
+        rows_html += f"""
+        <div class="oct-row">
+          <div class="oct-l">{cat}</div>
+          <div class="oct-mid">{round_pct:.1f}%</div>
+          <div class="oct-r {cls}">{arrow} {delta:+.1f}%</div>
+        </div>
+        """
+
+    html = f"""
+    <style>
+      .oct-wrap {{
+        background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%);
+        border:1px solid rgba(255,255,255,.08);
+        border-radius:14px;
+        padding:12px 14px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.16);
+      }}
+      .oct-head {{
+        font-size:13px;
+        font-weight:800;
+        color:#fff;
+        margin-bottom:8px;
+      }}
+      .oct-sub {{
+        font-size:11px;
+        color:#aaa;
+        margin-bottom:8px;
+      }}
+      .oct-row {{
+        display:grid;
+        grid-template-columns: 1fr 80px 92px;
+        gap:10px;
+        align-items:center;
+        margin:7px 0;
+      }}
+      .oct-l {{ color:#e0e0e0; font-weight:700; }}
+      .oct-mid {{ color:#fff; font-weight:800; text-align:right; font-variant-numeric:tabular-nums; }}
+      .oct-r {{ text-align:right; font-weight:800; font-variant-numeric:tabular-nums; }}
+      .oct-good {{ color:#64dfb5; }}
+      .oct-bad {{ color:#ee6c4d; }}
+      .oct-flat {{ color:#bdbdbd; }}
+    </style>
+    <div class="oct-wrap">
+      <div class="oct-head">📊 Round Shape vs Baseline</div>
+      <div class="oct-sub">How this round’s scoring categories compare to your selected baseline.</div>
+      {rows_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def build_trends_round_frame(frame):
+    d = frame.copy()
+    round_col = _resolve_round_col(d)
+    if round_col is None or round_col not in d.columns or d.empty:
+        return pd.DataFrame(columns=["Round", "Date", "ScorePer18", "GIRPct", "FWPct", "PuttsPer18", "BirdieRate", "ScramblePct", "UpDownPct"])
+
+    work = d.copy()
+    work["Date Played"] = pd.to_datetime(_safe_col(work, "Date Played", pd.NaT), errors="coerce")
+    work["Hole Score"] = pd.to_numeric(_safe_col(work, "Hole Score", 0), errors="coerce").fillna(0)
+    work["Par"] = pd.to_numeric(_safe_col(work, "Par", 0), errors="coerce").fillna(0)
+    work["Putts"] = pd.to_numeric(_safe_col(work, "Putts", 0), errors="coerce").fillna(0)
+    work["GIR"] = pd.to_numeric(_safe_col(work, "GIR", 0), errors="coerce").fillna(0)
+    work["Fairway"] = pd.to_numeric(_safe_col(work, "Fairway", 0), errors="coerce").fillna(0)
+    work["Scramble"] = pd.to_numeric(_safe_col(work, "Scramble", 0), errors="coerce").fillna(0)
+    work["Scramble Opportunity"] = pd.to_numeric(_safe_col(work, "Scramble Opportunity", 0), errors="coerce").fillna(0)
+    work["BirdieFlag"] = pd.to_numeric(_safe_col(work, "Birdie", 0), errors="coerce").fillna(0)
+    if "Score Label" in work.columns:
+        work["BirdieFlag"] = ((work["Score Label"].astype(str) == "Birdie") | (work["Score Label"].astype(str) == "Eagle") | (work["Score Label"].astype(str) == "Albatross")).astype(int)
+
+    def _agg(block):
+        holes = len(block)
+        fw_block = block[block["Par"].isin([4, 5])].copy()
+        gir0 = (pd.to_numeric(block["GIR"], errors="coerce").fillna(0) == 0)
+        putt1 = (pd.to_numeric(block["Putts"], errors="coerce").fillna(0) == 1)
+
+        par3_scores = pd.to_numeric(block.loc[block["Par"] == 3, "Hole Score"], errors="coerce").dropna()
+        par4_scores = pd.to_numeric(block.loc[block["Par"] == 4, "Hole Score"], errors="coerce").dropna()
+        par5_scores = pd.to_numeric(block.loc[block["Par"] == 5, "Hole Score"], errors="coerce").dropna()
+
+        avg_par3 = float(par3_scores.mean()) if len(par3_scores) else 0.0
+        avg_par4 = float(par4_scores.mean()) if len(par4_scores) else 0.0
+        avg_par5 = float(par5_scores.mean()) if len(par5_scores) else 0.0
+        score_per18 = (4 * avg_par3) + (10 * avg_par4) + (4 * avg_par5)
+
+        return pd.Series({
+            "Date": pd.to_datetime(block["Date Played"], errors="coerce").max(),
+            "ScorePer18": score_per18,
+            "GIRPct": (block["GIR"].sum() / holes * 100.0) if holes else 0.0,
+            "FWPct": (fw_block["Fairway"].sum() / len(fw_block) * 100.0) if len(fw_block) else 0.0,
+            "PuttsPer18": (block["Putts"].sum() / holes * 18.0) if holes else 0.0,
+            "BirdieRate": (block["BirdieFlag"].sum() / holes * 100.0) if holes else 0.0,
+            "ScramblePct": (block["Scramble"].sum() / block["Scramble Opportunity"].sum() * 100.0) if block["Scramble Opportunity"].sum() else 0.0,
+            "UpDownPct": ((gir0 & putt1).sum() / block["Scramble Opportunity"].sum() * 100.0) if block["Scramble Opportunity"].sum() else 0.0,
+        })
+
+    out = work.groupby(round_col, dropna=True).apply(_agg).reset_index().rename(columns={round_col: "Round"})
+    out = out.sort_values(["Date", "Round"]).reset_index(drop=True)
+    out["RoundNumber"] = range(1, len(out) + 1)
+    for c in ["ScorePer18", "GIRPct", "FWPct", "PuttsPer18", "BirdieRate", "ScramblePct", "UpDownPct"]:
+        out[f"{c}_Roll5"] = out[c].rolling(5, min_periods=1).mean()
+    return out
+
+def render_trend_line_chart(trend_df, value_col, roll_col, title, y_title, lower_better=False):
+    if trend_df is None or trend_df.empty:
+        st.info(f"No data available for {title.lower()}.")
+        return
+
+    plot_df = trend_df.copy()
+    plot_df["RoundNumber"] = pd.to_numeric(plot_df["RoundNumber"], errors="coerce")
+    plot_df[value_col] = pd.to_numeric(plot_df[value_col], errors="coerce")
+    plot_df[roll_col] = pd.to_numeric(plot_df[roll_col], errors="coerce")
+    plot_df["DateLabel"] = pd.to_datetime(plot_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    plot_df = plot_df.dropna(subset=["RoundNumber", value_col, roll_col]).copy()
+
+    if plot_df.empty:
+        st.info(f"No data available for {title.lower()}.")
+        return
+
+    base_val = float(plot_df[value_col].mean()) if len(plot_df) else 0.0
+    base_df = pd.DataFrame({"Baseline": [base_val]})
+
+    line_actual = alt.Chart(plot_df).mark_line(point=True, strokeWidth=2.8).encode(
+        x=alt.X("RoundNumber:Q", title="Round"),
+        y=alt.Y(f"{value_col}:Q", title=y_title),
+        tooltip=[
+            alt.Tooltip("RoundNumber:Q", title="Round #"),
+            alt.Tooltip("DateLabel:N", title="Date"),
+            alt.Tooltip(f"{value_col}:Q", title=y_title, format=".1f"),
+            alt.Tooltip(f"{roll_col}:Q", title="Rolling 5", format=".1f"),
+        ],
+        color=alt.value("#4f8cff")
+    )
+
+    line_roll = alt.Chart(plot_df).mark_line(strokeWidth=3.2, opacity=0.95).encode(
+        x=alt.X("RoundNumber:Q"),
+        y=alt.Y(f"{roll_col}:Q"),
+        color=alt.value("#64dfb5")
+    )
+
+    base_rule = alt.Chart(base_df).mark_rule(strokeDash=[6, 4], opacity=0.8, color="#f2c14e").encode(
+        y=alt.Y("Baseline:Q")
+    )
+
+    st.altair_chart(
+        (base_rule + line_actual + line_roll).properties(height=280, title=title).configure_view(strokeOpacity=0),
+        use_container_width=True
+    )
+
+
+def build_trends_strengths(trend_df):
+    if trend_df is None or trend_df.empty:
+        return ["No round trend data available yet."]
+
+    last_row = trend_df.iloc[-1]
+    metric_cols = [c for c in ["ScorePer18", "GIRPct", "FWPct", "PuttsPer18", "BirdieRate", "ScramblePct", "UpDownPct"] if c in trend_df.columns]
+    if not metric_cols:
+        return ["No round trend data available yet."]
+
+    all_time = trend_df[metric_cols].apply(pd.to_numeric, errors="coerce").mean(numeric_only=True)
+
+    metrics = [
+        ("Score / 18", "ScorePer18", True, ""),
+        ("GIR %", "GIRPct", False, "%"),
+        ("FW %", "FWPct", False, "%"),
+        ("Putts / 18", "PuttsPer18", True, ""),
+        ("Birdie Rate", "BirdieRate", False, "%"),
+        ("Scramble %", "ScramblePct", False, "%"),
+        ("Up & Down %", "UpDownPct", False, "%"),
+    ]
+
+    strengths = []
+    for label, col, lower_better, unit in metrics:
+        if col not in trend_df.columns or col not in all_time.index:
+            continue
+        cur = float(pd.to_numeric(last_row.get(col), errors="coerce"))
+        base = float(pd.to_numeric(all_time.get(col), errors="coerce"))
+        raw_delta = cur - base
+        good_delta = (-raw_delta) if lower_better else raw_delta
+        strengths.append((label, cur, base, raw_delta, good_delta, unit))
+
+    strengths = sorted(strengths, key=lambda x: x[4], reverse=True)
+
+    out = []
+    for label, cur, base, raw_delta, good_delta, unit in strengths[:3]:
+        if good_delta > 0.05:
+            out.append(f"{label}: {cur:.1f}{unit} vs all-time {base:.1f}{unit} ({raw_delta:+.1f}{unit})")
+
+    if not out:
+        out.append("No clear strengths bubble above baseline yet.")
+    return out
+
+def build_trends_insights(trend_df):
+    if trend_df is None or trend_df.empty or len(trend_df) < 2:
+        return {
+            "good": ["Need at least 2 rounds to generate trend insights."],
+            "watch": ["Add a few more rounds to unlock trend comparisons."],
+        }
+
+    last5 = trend_df.tail(5)
+    prior20 = trend_df.iloc[:-5].tail(20) if len(trend_df) > 5 else trend_df.iloc[:-1]
+
+    metrics = [
+        ("Score / 18", "ScorePer18", True),
+        ("GIR %", "GIRPct", False),
+        ("FW %", "FWPct", False),
+        ("Putts / 18", "PuttsPer18", True),
+        ("Birdie Rate", "BirdieRate", False),
+        ("Scramble %", "ScramblePct", False),
+        ("Up & Down %", "UpDownPct", False),
+    ]
+
+    scored = []
+    for label, col, lower_better in metrics:
+        if col not in trend_df.columns:
+            continue
+        recent = float(pd.to_numeric(last5[col], errors="coerce").fillna(0).mean()) if len(last5) else 0.0
+        prior = float(pd.to_numeric(prior20[col], errors="coerce").fillna(0).mean()) if len(prior20) else recent
+        raw_delta = recent - prior
+        good_delta = (-raw_delta) if lower_better else raw_delta
+        scored.append((label, recent, prior, raw_delta, good_delta, lower_better))
+
+    if not scored:
+        return {
+            "good": ["No trend metrics available yet."],
+            "watch": ["No trend metrics available yet."],
+        }
+
+    good_sorted = sorted(scored, key=lambda x: x[4], reverse=True)
+    bad_sorted = sorted(scored, key=lambda x: x[4])
+
+    good = []
+    for label, recent, prior, raw_delta, good_delta, lower_better in good_sorted[:3]:
+        if good_delta > 0.05:
+            unit = "%" if "Rate" in label or "%" in label else ""
+            good.append(f"{label}: {recent:.1f}{unit} vs {prior:.1f}{unit} ({raw_delta:+.1f}{unit})")
+
+    watch = []
+    for label, recent, prior, raw_delta, good_delta, lower_better in bad_sorted[:3]:
+        if good_delta < -0.05:
+            unit = "%" if "Rate" in label or "%" in label else ""
+            watch.append(f"{label}: {recent:.1f}{unit} vs {prior:.1f}{unit} ({raw_delta:+.1f}{unit})")
+
+    if not good:
+        good.append("No major positive trend spikes yet versus the prior sample.")
+    if not watch:
+        watch.append("No major negative trends stood out versus the prior sample.")
+
+    return {"good": good, "watch": watch}
+
+def render_trends_summary_cards(trend_df):
+    if trend_df is None or trend_df.empty:
+        st.info("No round trend data available.")
+        return
+
+    import streamlit.components.v1 as components
+
+    last_row = trend_df.iloc[-1]
+    metric_cols = [c for c in ["ScorePer18", "GIRPct", "FWPct", "PuttsPer18", "BirdieRate"] if c in trend_df.columns]
+    if not metric_cols:
+        st.info("No round trend data available.")
+        return
+    all_time = trend_df[metric_cols].apply(pd.to_numeric, errors="coerce").mean(numeric_only=True)
+
+    cards = [
+        ("Score / 18", "ScorePer18", True, "{:.1f}"),
+        ("GIR %", "GIRPct", False, "{:.1f}%"),
+        ("FW %", "FWPct", False, "{:.1f}%"),
+        ("Putts / 18", "PuttsPer18", True, "{:.1f}"),
+        ("Birdie Rate", "BirdieRate", False, "{:.1f}%"),
+    ]
+
+    html = """
+    <style>
+      .tr-wrap {display:grid; grid-template-columns:repeat(5, minmax(190px,1fr)); gap:12px; margin:8px 0 14px 0; font-family:Segoe UI, Roboto, Arial, sans-serif;}
+      .tr-card {background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:14px 16px; box-shadow:0 8px 18px rgba(0,0,0,.16); min-height:132px;}
+      .tr-k {font-size:13px; color:#c8c8c8; font-weight:800; margin-bottom:8px; line-height:1.28; min-height:36px; letter-spacing:.1px;}
+      .tr-v {font-size:25px; color:#fff; font-weight:900; margin-bottom:6px; line-height:1.05;}
+      .tr-b {font-size:12px; color:#bdbdbd;}
+      .tr-d {font-size:12px; font-weight:800; margin-top:4px;}
+      .tr-good {color:#64dfb5;}
+      .tr-bad {color:#ee6c4d;}
+      .tr-flat {color:#bdbdbd;}
+    </style>
+    <div class="tr-wrap">
+    """
+    for label, col, lower_better, fmt in cards:
+        if col not in trend_df.columns or col not in all_time.index:
+            continue
+        cur = float(pd.to_numeric(last_row.get(col), errors="coerce"))
+        base = float(pd.to_numeric(all_time.get(col), errors="coerce"))
+        diff = cur - base
+        good_delta = -diff if lower_better else diff
+        cls = "tr-good" if good_delta > 0.05 else ("tr-bad" if good_delta < -0.05 else "tr-flat")
+        arrow = "🔼" if good_delta > 0.05 else ("🔽" if good_delta < -0.05 else "➡️")
+        html += f"""
+        <div class="tr-card">
+          <div class="tr-k">{label}</div>
+          <div class="tr-v">{fmt.format(cur)}</div>
+          <div class="tr-b">All-time avg: {fmt.format(base)}</div>
+          <div class="tr-d {cls}">{arrow} {diff:+.1f}{'%' if '%' in fmt else ''}</div>
+        </div>
+        """
+    html += "</div>"
+    components.html(html, height=150, scrolling=False)
+
+
+
+
+def build_round_leaderboard_frame(frame):
+    d = frame.copy()
+    round_col = _resolve_round_col(d)
+    if round_col is None or round_col not in d.columns or d.empty:
+        return pd.DataFrame(columns=[
+            "Round", "Date", "Player", "Course", "Holes", "TotalScore", "PlusMinus", "ScoreToPar", "ScorePer18", "ScoreDisplay",
+            "GIRPct", "GIRDisplay", "FWPct", "FWDisplay", "PuttsPer18", "PuttsDisplay",
+            "BirdieRate", "BirdieDisplay", "ScramblePct", "ScrambleDisplay", "UpDownPct", "UpDownDisplay",
+            "Arnies", "ArniesDisplay", "Seves", "SevesDisplay",
+            "OnePutts", "OnePuttsDisplay", "ThreePuttPlus", "ThreePuttPlusDisplay", "ThreePuttBogeys", "ThreePuttBogeysDisplay",
+            "ParOrBetterStreak", "BirdieBetterStreak",
+            "ParCount", "BogeyCount", "DoublePlusCount",
+            "ParDisplay", "BogeyDisplay", "DoublePlusDisplay",
+            "LostBalls", "LostBallsDisplay"
+        ])
+
+    d["Date Played"] = pd.to_datetime(_safe_col(d, "Date Played", pd.NaT), errors="coerce")
+    d["Hole Score"] = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+    d["Par"] = pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+    d["Putts"] = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0)
+    d["GIR"] = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0)
+    d["Fairway"] = pd.to_numeric(_safe_col(d, "Fairway", 0), errors="coerce").fillna(0)
+    d["Scramble"] = pd.to_numeric(_safe_col(d, "Scramble", 0), errors="coerce").fillna(0)
+    d["Scramble Opportunity"] = pd.to_numeric(_safe_col(d, "Scramble Opportunity", 0), errors="coerce").fillna(0)
+    d["Arnie"] = pd.to_numeric(_safe_col(d, "Arnie", 0), errors="coerce").fillna(0)
+    d["Seve"] = pd.to_numeric(_safe_col(d, "Seve", 0), errors="coerce").fillna(0)
+    d["LostBallTee"] = pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0)
+    d["LostBallAppr"] = pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0)
+    d["ThreePuttBogeyField"] = pd.to_numeric(_safe_col(d, "3 Putt Bogey", 0), errors="coerce").fillna(0)
+    if "Hole" in d.columns:
+        d["Hole"] = pd.to_numeric(_safe_col(d, "Hole", 0), errors="coerce").fillna(0)
+
+    if "Score Label" in d.columns:
+        d["ScoreLabelClean"] = d["Score Label"].fillna("").astype(str)
+        d["BirdieFlag"] = d["ScoreLabelClean"].isin(["Birdie", "Eagle", "Albatross"]).astype(int)
+    else:
+        d["ScoreLabelClean"] = ""
+        d["BirdieFlag"] = pd.to_numeric(_safe_col(d, "Birdie", 0), errors="coerce").fillna(0)
+
+    def _longest_streak(bool_series):
+        best = 0
+        cur = 0
+        for v in list(bool_series):
+            if bool(v):
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 0
+        return int(best)
+
+    def _agg(block):
+        if "Hole" in block.columns:
+            block = block.sort_values("Hole").copy()
+        holes = len(block)
+        fw_block = block[block["Par"].isin([4, 5])].copy()
+        gir0 = (pd.to_numeric(block["GIR"], errors="coerce").fillna(0) == 0)
+        putt1 = (pd.to_numeric(block["Putts"], errors="coerce").fillna(0) == 1)
+        putts_clean = pd.to_numeric(block["Putts"], errors="coerce").fillna(0)
+
+        par3_scores = pd.to_numeric(block.loc[block["Par"] == 3, "Hole Score"], errors="coerce").dropna()
+        par4_scores = pd.to_numeric(block.loc[block["Par"] == 4, "Hole Score"], errors="coerce").dropna()
+        par5_scores = pd.to_numeric(block.loc[block["Par"] == 5, "Hole Score"], errors="coerce").dropna()
+        avg_par3 = float(par3_scores.mean()) if len(par3_scores) else 0.0
+        avg_par4 = float(par4_scores.mean()) if len(par4_scores) else 0.0
+        avg_par5 = float(par5_scores.mean()) if len(par5_scores) else 0.0
+
+        total_score = float(pd.to_numeric(block["Hole Score"], errors="coerce").fillna(0).sum())
+        total_par = float(pd.to_numeric(block["Par"], errors="coerce").fillna(0).sum())
+        score_to_par = total_score - total_par
+        plus_minus = f"{score_to_par:+.0f}" if abs(score_to_par) >= 1e-9 else "E"
+
+        score_to_par_series = pd.to_numeric(block["Hole Score"], errors="coerce").fillna(0) - pd.to_numeric(block["Par"], errors="coerce").fillna(0)
+        par_or_better = (score_to_par_series <= 0)
+        birdie_or_better = (score_to_par_series <= -1)
+
+        gir_made = int(pd.to_numeric(block["GIR"], errors="coerce").fillna(0).sum())
+        fw_made = int(pd.to_numeric(fw_block["Fairway"], errors="coerce").fillna(0).sum()) if len(fw_block) else 0
+        putts_total = float(putts_clean.sum())
+        birdies_total = int(pd.to_numeric(block["BirdieFlag"], errors="coerce").fillna(0).sum())
+        scramble_made = int(pd.to_numeric(block["Scramble"], errors="coerce").fillna(0).sum())
+        scramble_ops = int(pd.to_numeric(block["Scramble Opportunity"], errors="coerce").fillna(0).sum())
+        updown_made = int((gir0 & putt1).sum())
+        arnies = int(pd.to_numeric(block["Arnie"], errors="coerce").fillna(0).sum())
+        seves = int(pd.to_numeric(block["Seve"], errors="coerce").fillna(0).sum())
+        lost_balls = int(pd.to_numeric(block["LostBallTee"], errors="coerce").fillna(0).sum() + pd.to_numeric(block["LostBallAppr"], errors="coerce").fillna(0).sum())
+        one_putts = int((putts_clean == 1).sum())
+        three_putt_plus = int((putts_clean >= 3).sum())
+        three_putt_bogeys = int(pd.to_numeric(block["ThreePuttBogeyField"], errors="coerce").fillna(0).sum())
+
+        score_label_clean = block["ScoreLabelClean"].astype(str)
+        par_count = int(score_label_clean.isin(["Par"]).sum())
+        bogey_count = int(score_label_clean.isin(["Bogey"]).sum())
+        double_plus_count = int(score_label_clean.isin(["Double Bogey", "Triple Bogey +"]).sum())
+
+        gir_pct = (gir_made / holes * 100.0) if holes else 0.0
+        fw_pct = (fw_made / len(fw_block) * 100.0) if len(fw_block) else 0.0
+        putts_per18 = (putts_total / holes * 18.0) if holes else 0.0
+        birdie_rate = (birdies_total / holes * 100.0) if holes else 0.0
+        scramble_pct = (scramble_made / scramble_ops * 100.0) if scramble_ops else 0.0
+        updown_pct = (updown_made / scramble_ops * 100.0) if scramble_ops else 0.0
+
+        return pd.Series({
+            "Date": pd.to_datetime(block["Date Played"], errors="coerce").max(),
+            "Player": block["Player Name"].iloc[0] if "Player Name" in block.columns and len(block) else "",
+            "Course": block["Course Name"].iloc[0] if "Course Name" in block.columns and len(block) else "",
+            "Holes": holes,
+            "TotalScore": total_score,
+            "PlusMinus": plus_minus,
+            "ScoreToPar": score_to_par,
+            "ScorePer18": (4 * avg_par3) + (10 * avg_par4) + (4 * avg_par5),
+            "ScoreDisplay": f"{int(round(total_score))} ({plus_minus})",
+            "GIRPct": gir_pct,
+            "GIRDisplay": f"{gir_made}/{holes} ({gir_pct:.1f}%)",
+            "FWPct": fw_pct,
+            "FWDisplay": f"{fw_made}/{len(fw_block)} ({fw_pct:.1f}%)" if len(fw_block) else "0/0 (-)",
+            "PuttsPer18": putts_per18,
+            "PuttsDisplay": f"{int(round(putts_total))}/{holes} ({putts_per18:.1f}/18)",
+            "BirdieRate": birdie_rate,
+            "BirdieDisplay": f"{birdies_total}/{holes} ({birdie_rate:.1f}%)",
+            "ScramblePct": scramble_pct,
+            "ScrambleDisplay": f"{scramble_made}/{scramble_ops} ({scramble_pct:.1f}%)" if scramble_ops else "0/0 (-)",
+            "UpDownPct": updown_pct,
+            "UpDownDisplay": f"{updown_made}/{scramble_ops} ({updown_pct:.1f}%)" if scramble_ops else "0/0 (-)",
+            "Arnies": arnies,
+            "ArniesDisplay": f"{arnies}/{holes} ({(arnies / holes * 18.0):.1f}/18)" if holes else "0/0",
+            "Seves": seves,
+            "SevesDisplay": f"{seves}/{holes} ({(seves / holes * 18.0):.1f}/18)" if holes else "0/0",
+            "OnePutts": one_putts,
+            "OnePuttsDisplay": f"{one_putts}/{holes} ({(one_putts / holes * 100.0):.1f}%)",
+            "ThreePuttPlus": three_putt_plus,
+            "ThreePuttPlusDisplay": f"{three_putt_plus}/{holes} ({(three_putt_plus / holes * 100.0):.1f}%)",
+            "ThreePuttBogeys": three_putt_bogeys,
+            "ThreePuttBogeysDisplay": f"{three_putt_bogeys}/{holes} ({(three_putt_bogeys / holes * 100.0):.1f}%)",
+            "ParOrBetterStreak": _longest_streak(par_or_better),
+            "BirdieBetterStreak": _longest_streak(birdie_or_better),
+            "ParCount": par_count,
+            "BogeyCount": bogey_count,
+            "DoublePlusCount": double_plus_count,
+            "ParDisplay": f"{par_count}/{holes} ({(par_count / holes * 100.0):.1f}%)",
+            "BogeyDisplay": f"{bogey_count}/{holes} ({(bogey_count / holes * 100.0):.1f}%)",
+            "DoublePlusDisplay": f"{double_plus_count}/{holes} ({(double_plus_count / holes * 100.0):.1f}%)",
+            "LostBalls": lost_balls,
+            "LostBallsDisplay": f"{lost_balls}/{holes} ({(lost_balls / holes * 18.0):.1f}/18)" if holes else "0/0",
+        })
+
+    out = d.groupby(round_col, dropna=True).apply(_agg).reset_index().rename(columns={round_col: "Round"})
+    out = out[out["Holes"] == 18].copy()
+    return out.sort_values(["Date", "Round"]).reset_index(drop=True)
+
+def get_top_rounds(df_rounds, metric_col, n=5, lower_better=False, display_col=None):
+    if df_rounds is None or df_rounds.empty or metric_col not in df_rounds.columns:
+        return pd.DataFrame(columns=["Date", "Player", "Course", "Value", "Score"])
+    out = df_rounds.copy()
+    out[metric_col] = pd.to_numeric(out[metric_col], errors="coerce")
+    out = out.dropna(subset=[metric_col]).copy()
+    out = out.sort_values(metric_col, ascending=lower_better).head(n).copy()
+
+    if display_col and display_col in out.columns:
+        out["Value"] = out[display_col].astype(str)
+    else:
+        if metric_col in ["ScoreToPar", "ParOrBetterStreak", "BirdieBetterStreak", "ParCount", "BogeyCount", "DoublePlusCount", "LostBalls", "Arnies", "Seves"]:
+            out["Value"] = pd.to_numeric(out[metric_col], errors="coerce").fillna(0).astype(int).astype(str)
+        else:
+            out["Value"] = pd.to_numeric(out[metric_col], errors="coerce").map(lambda x: f"{x:.1f}" if pd.notna(x) else "—")
+
+    out["Score"] = out["ScoreDisplay"].astype(str) if "ScoreDisplay" in out.columns else out.get("ScoreToParDisplay","")
+    return out[["Date", "Player", "Course", "Value", "Score"]].reset_index(drop=True)
+
+
+def _style_bestof_table(df_table, title=""):
+    out = df_table.copy()
+    if "Date" in out.columns:
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    def _clean_text(v):
+        s = str(v)
+        s = s.replace(".0)", ")")
+        s = s.replace("(+0)", "(E)")
+        s = s.replace("(-0)", "(E)")
+        s = s.replace(" 0.0%", " 0%")
+        s = s.replace(" 100.0%", " 100%")
+        return s
+
+    if "Value" in out.columns:
+        out["Value"] = out["Value"].map(_clean_text)
+    if "Score" in out.columns:
+        out["Score"] = out["Score"].map(_clean_text)
+
+    return out
+
+
+def build_overview_round_summary(metric_df):
+
+
+    if metric_df is None or metric_df.empty:
+        return {"good": [], "lock": []}
+
+    # Exclude raw total score from "what went well / lock in" since score-per-18 is the cleaner comparison metric
+    work_df = metric_df[metric_df["Metric"] != "Total Score"].copy()
+
+    good_df = work_df.sort_values(["GoodDelta", "Metric"], ascending=[False, True]).copy()
+    lock_df = work_df.sort_values(["GoodDelta", "Metric"], ascending=[True, True]).copy()
+
+    good = []
+    for _, r in good_df.head(3).iterrows():
+        if r["GoodDelta"] > 0.05:
+            good.append(f'{r["Metric"]}: {r["Round Display"]} ({r["Delta Display"]})')
+
+    lock = []
+    for _, r in lock_df.head(3).iterrows():
+        if r["GoodDelta"] < -0.05:
+            lock.append(f'{r["Metric"]}: {r["Round Display"]} ({r["Delta Display"]})')
+
+    if not good:
+        good.append("No major spike areas stood out versus this comparison set.")
+    if not lock:
+        lock.append("No major leak areas stood out versus this comparison set.")
+
+    return {"good": good, "lock": lock}
+
 # =========================================================
 # Tabs
 # =========================================================
-tab_scorecard, tab_approach, tab_putting, tab_shortgame = st.tabs(["Scorecard", "Approach", "Putting", "Short Game"])
+tab_scorecard, tab_overview, tab_analysis, tab_putting, tab_trends, tab_bestof, tab_shortgame = st.tabs(["Scorecard", "Overview", "Analysis", "Putting", "Trends", "Best Of", "Short Game"])
+
+with tab_overview:
+    st.markdown("### 📋 High-Level Overview")
+    st.caption("Quick top-line round review with a cleaner comparison view.")
+    compare_mode_overview = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="overview_compare_mode")
+    benchmark_df = build_benchmark_df(df, round_data, compare_mode_overview)
+
+    round_overview = build_overview_snapshot(round_data)
+    base_overview = build_overview_snapshot(benchmark_df)
+    metric_df = build_overview_metric_rows(round_overview, base_overview, compare_mode_overview)
+
+    render_overview_cards(metric_df, compare_mode_overview)
+
+    top_left, top_right = st.columns([1.25, 1.0])
+
+    with top_left:
+        st.markdown("#### Comparison Table")
+        overview_table = metric_df[["Metric", "Round Display", "Baseline Display", "Delta Display", "Better"]].rename(columns={
+            "Round Display": "Round",
+            "Baseline Display": compare_mode_overview,
+            "Delta Display": "Change",
+        }).copy()
+        st.dataframe(overview_table, use_container_width=True, hide_index=True)
+
+    with top_right:
+        st.markdown("#### Improvement Snapshot")
+        render_overview_delta_chart(metric_df, compare_mode_overview)
+
+    quick1, quick2, quick3, quick4 = st.columns(4)
+    with quick1:
+        st.markdown(
+            f"""
+            <div style="background:#242424; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:12px 14px; line-height:1.55;">
+              <b>🎯 Ball Striking</b><br>
+              GIR: <span style="font-weight:800;">{round_overview['gir_pct']:.1f}%</span><br>
+              Fairway: <span style="font-weight:800;">{round_overview['fw_pct']:.1f}%</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with quick2:
+        st.markdown(
+            f"""
+            <div style="background:#242424; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:12px 14px; line-height:1.55;">
+              <b>⛳ Scoring Support</b><br>
+              Scramble: <span style="font-weight:800;">{round_overview['scramble_pct']:.1f}%</span><br>
+              Up & Down: <span style="font-weight:800;">{round_overview['updown_pct']:.1f}%</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with quick3:
+        st.markdown(
+            f"""
+            <div style="background:#242424; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:12px 14px; line-height:1.55;">
+              <b>🪄 Creativity Stats</b><br>
+              Arnies / 18: <span style="font-weight:800;">{round_overview['arnies_per18']:.2f}</span><br>
+              Seves / 18: <span style="font-weight:800;">{round_overview['seves_per18']:.2f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with quick4:
+        st.markdown(
+            f"""
+            <div style="background:#242424; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:12px 14px; line-height:1.55;">
+              <b>🧠 Round Shape</b><br>
+              Avg First-Putt Prox: <span style="font-weight:800;">{round_overview['avg_prox']:.1f} ft</span><br>
+              Lost Balls / 18: <span style="font-weight:800;">{round_overview['lost_balls_per18']:.2f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.markdown("### Overall Scoring Breakdown")
+
+    round_mix = build_score_mix_summary(round_data)
+    base_mix = build_score_mix_summary(benchmark_df)
+
+    mix_left, mix_right = st.columns(2)
+    with mix_left:
+        st.markdown("##### Score Type Mix")
+        render_segmented_score_mix_compare(round_mix["score_df"], base_mix["score_df"], compare_mode_overview)
+    with mix_right:
+        st.markdown("##### Score Category Mix")
+        render_segmented_category_mix_compare(round_mix["cat_df"], base_mix["cat_df"], compare_mode_overview)
+
+    ov_summary = build_overview_round_summary(metric_df)
+
+    st.markdown("#### Round Summary")
+    sum_left, sum_right = st.columns(2)
+    with sum_left:
+        good_html = "<br>".join([f"• {x}" for x in ov_summary["good"]])
+        st.markdown(
+            f"""
+            <div style="background:#1f2c25; border:1px solid rgba(100,223,181,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+              <b>✅ What went well</b><br>
+              {good_html}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with sum_right:
+        lock_html = "<br>".join([f"• {x}" for x in ov_summary["lock"]])
+        st.markdown(
+            f"""
+            <div style="background:#2d2323; border:1px solid rgba(238,108,77,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+              <b>🔒 What needs to be locked in</b><br>
+              {lock_html}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 with tab_scorecard:
     table_html = f"""
     <style>
       .sc-wrap {{
-        background:#2a2a2a; padding:10px; border-radius:10px;
-        box-shadow: 0 6px 14px rgba(0,0,0,.15);
+        background:linear-gradient(180deg,#262626 0%, #202020 100%);
+        padding:10px; border-radius:14px;
+        box-shadow: 0 10px 22px rgba(0,0,0,.18);
+        border:1px solid rgba(255,255,255,.06);
       }}
       .sc-table {{
         width:100%; border-collapse:separate; border-spacing:0;
-        font-size:12.5px; line-height:1.28; color:#fff;
+        font-size:12.2px; line-height:1.22; color:#fff;
+        overflow:hidden;
       }}
       .sc-table thead th {{
         position: sticky; top: 0; z-index: 2;
         background:#3a3a3a; color:#fff; text-align:center;
-        padding:4px 6px; font-weight:700; border-bottom:1px solid rgba(255,255,255,.08);
+        padding:5px 6px; font-weight:800; border-bottom:1px solid rgba(255,255,255,.08);
+      }}
+      .sc-table thead th:first-child {{
+        border-top-left-radius:10px;
+      }}
+      .sc-table thead th:last-child {{
+        border-top-right-radius:10px;
       }}
       .sc-table tbody td, .sc-table tbody th {{
-        padding:3px 6px; border-bottom:1px solid rgba(255,255,255,.06);
+        padding:4px 6px; border-bottom:1px solid rgba(255,255,255,.05);
         text-align:center;
       }}
-      .sc-table tbody tr:nth-child(odd)  {{ background:#353535; }}
-      .sc-table tbody tr:nth-child(even) {{ background:#2f2f2f; }}
+      .sc-table tbody tr:nth-child(odd)  {{ background:#333333; }}
+      .sc-table tbody tr:nth-child(even) {{ background:#2c2c2c; }}
+      .sc-table tbody tr:hover {{ background:#3b3b3b; }}
       .sc-label {{
-        text-align:left; font-weight:700; color:#fff; white-space:nowrap;
+        text-align:left; font-weight:800; color:#fff; white-space:nowrap;
+        background:rgba(255,255,255,.02);
       }}
       .sc-score {{
-        font-size:18px; font-weight:800; letter-spacing:.2px;
+        font-size:18px; font-weight:900; letter-spacing:.15px;
       }}
     </style>
 
@@ -3208,8 +4529,52 @@ with tab_scorecard:
     Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}
     """
 
-    st.markdown(summary_header_html, unsafe_allow_html=True)
-    st.markdown(cards_html, unsafe_allow_html=True)
+    render_scorecard_summary_panel(
+        player=player,
+        course=course,
+        date=date,
+        total_score=total_score,
+        score_to_par_str=score_to_par_str,
+        holes_played=holes_played,
+        putts_per_hole=putts_per_hole,
+        gir_total=gir_total,
+        gir_pct_num=gir_pct_num,
+        fw_total=fw_total,
+        fw_attempts=fw_attempts,
+        fw_pct_num=fw_pct_num,
+        scrambles_display=scrambles_display,
+        updowns_display=updowns_display,
+        us_open_made=us_open_made,
+        us_open_attempts=us_open_attempts,
+        us_open_pct=us_open_pct,
+        avg_par3=avg_par3,
+        avg_par4=avg_par4,
+        avg_par5=avg_par5,
+        total_1_putts=total_1_putts,
+        total_3_plus_putts=total_3_plus_putts,
+        total_3_putt_bogeys=total_3_putt_bogeys,
+        pro_pars_total=pro_pars_total,
+        arnies_total=arnies_total,
+        seves_total=seves_total,
+        hole_outs_total=hole_outs_total,
+        lost_balls_display=lost_balls_display,
+        gir3_m=gir3_m,
+        gir3_t=gir3_t,
+        gir3_pct=gir3_pct,
+        gir4_m=gir4_m,
+        gir4_t=gir4_t,
+        gir4_pct=gir4_pct,
+        gir5_m=gir5_m,
+        gir5_t=gir5_t,
+        gir5_pct=gir5_pct,
+        fw4_m=fw4_m,
+        fw4_t=fw4_t,
+        fw4_pct=fw4_pct,
+        fw5_m=fw5_m,
+        fw5_t=fw5_t,
+        fw5_pct=fw5_pct
+    )
+
     st.markdown(benchmarks_html, unsafe_allow_html=True)
 
     perf_grade, perf_score, perf_details = build_round_performance_rating(round_data, build_benchmark_df(df, round_data, "All Time"))
@@ -3503,8 +4868,9 @@ with tab_scorecard:
         mime="text/html"
     )
 
-with tab_approach:
+with tab_analysis:
     st.markdown("### 🎯 Approach Breakdown")
+    st.info("For deeper filters, shot-pattern exploration, GIR-only splits, Best Clubs, and Best Yardage Windows, jump over to the Analysis tab.")
     compare_mode = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="approach_compare_mode")
     benchmark_df = build_benchmark_df(df, round_data, compare_mode)
 
@@ -3720,44 +5086,81 @@ with tab_approach:
     st.markdown("#### Distance vs Club Heatmap")
     render_distance_club_heatmap(round_data, title="Round Distance vs Club Heatmap")
 
-    st.markdown("#### Approach Filter View (Club / Yardage / Course)")
+    st.markdown("#### Analysis Tools Moved")
+    st.caption("The deeper filter tools and shot-pattern exploration now live in the Analysis tab so this Approach tab stays focused on round review.")
+
+    approach_debug = prepare_approach_frame(round_data).copy()
+    if not approach_debug.empty:
+        approach_debug = approach_debug.sort_values("Hole")[[
+            "Hole", "Approach Club", "Approach Distance", "Approach Bucket",
+            "Approach GIR Flag", "Approach Miss Direction Clean", "Approach Proximity"
+        ]].rename(columns={
+            "Approach Club": "Club",
+            "Approach Distance": "Distance",
+            "Approach Bucket": "Bucket",
+            "Approach GIR Flag": "Approach GIR",
+            "Approach Miss Direction Clean": "Miss Dir",
+            "Approach Proximity": "Prox"
+        })
+    render_debug_section("🔎 Debug: Approach rows used in calculations", approach_debug)
+
+
+with tab_analysis:
+    st.markdown("### 📊 Analysis")
+    st.caption("Deeper filtering and pattern-finding for approach play, including GIR-only views, best clubs, and best yardage windows.")
+
+    analysis_base_player_df = df[df["Player Name"] == player].copy() if "Player Name" in df else df.copy()
+
+    st.markdown("#### Analysis Filter View (Club / Yardage / Course)")
     filter_options_base = build_shot_pattern_frame(df, player)
     if not filter_options_base.empty:
         fa1, fa2, fa3 = st.columns(3)
         with fa1:
             yard_options = [b for b in APPROACH_BUCKET_ORDER if b in filter_options_base["Approach Bucket"].dropna().astype(str).tolist()]
-            approach_yards = st.multiselect("Yardage Buckets", yard_options, default=[], key="approach_filter_yards_multi")
+            analysis_yards = st.multiselect("Yardage Buckets", yard_options, default=[], key="analysis_filter_yards_multi")
         with fa2:
             club_options = sorted([c for c in filter_options_base["Approach Club"].dropna().unique().tolist() if str(c).strip() != ""])
-            approach_clubs = st.multiselect("Clubs", club_options, default=[], key="approach_filter_clubs_multi")
+            analysis_clubs = st.multiselect("Clubs", club_options, default=[], key="analysis_filter_clubs_multi")
         with fa3:
             course_options = sorted([c for c in filter_options_base["Course Name"].dropna().unique().tolist()]) if "Course Name" in filter_options_base else []
-            approach_courses = st.multiselect("Courses", course_options, default=[], key="approach_filter_courses_multi")
+            analysis_courses = st.multiselect("Courses", course_options, default=[], key="analysis_filter_courses_multi")
 
-        fa4, fa5 = st.columns(2)
+        fa4, fa5, fa6 = st.columns(3)
         with fa4:
             fairway_labels = {1: "Fairway Hit", 0: "Fairway Miss"}
-            approach_fairway_labels = st.multiselect("Fairway", list(fairway_labels.values()), default=[], key="approach_filter_fairway_multi")
-            approach_fairway_vals = [k for k, v in fairway_labels.items() if v in approach_fairway_labels]
+            analysis_fairway_labels = st.multiselect("Fairway", list(fairway_labels.values()), default=[], key="analysis_filter_fairway_multi")
+            analysis_fairway_vals = [k for k, v in fairway_labels.items() if v in analysis_fairway_labels]
         with fa5:
-            par_options = [3, 4, 5]
-            approach_pars = st.multiselect("Hole Par", par_options, default=[], key="approach_filter_par_multi")
+            analysis_pars = st.multiselect("Hole Par", [3, 4, 5], default=[], key="analysis_filter_par_multi")
+        with fa6:
+            analysis_gir_mode = st.selectbox("GIR Filter", ["All", "GIR Only", "Missed GIR Only"], index=0, key="analysis_filter_gir_mode")
 
         round_filter_view = apply_approach_filters(
             round_data,
-            yard_buckets=approach_yards,
-            clubs=approach_clubs,
-            courses=approach_courses,
-            fairway_vals=approach_fairway_vals,
-            par_vals=approach_pars,
+            yard_buckets=analysis_yards,
+            clubs=analysis_clubs,
+            courses=analysis_courses,
+            fairway_vals=analysis_fairway_vals,
+            par_vals=analysis_pars,
+            gir_mode=analysis_gir_mode,
         )
         bench_filter_view = apply_approach_filters(
             benchmark_df,
-            yard_buckets=approach_yards,
-            clubs=approach_clubs,
-            courses=approach_courses,
-            fairway_vals=approach_fairway_vals,
-            par_vals=approach_pars,
+            yard_buckets=analysis_yards,
+            clubs=analysis_clubs,
+            courses=analysis_courses,
+            fairway_vals=analysis_fairway_vals,
+            par_vals=analysis_pars,
+            gir_mode=analysis_gir_mode,
+        )
+        analysis_all_player_view = apply_approach_filters(
+            analysis_base_player_df,
+            yard_buckets=analysis_yards,
+            clubs=analysis_clubs,
+            courses=analysis_courses,
+            fairway_vals=analysis_fairway_vals,
+            par_vals=analysis_pars,
+            gir_mode=analysis_gir_mode,
         )
 
         filt_metrics = build_filtered_approach_metrics(round_filter_view)
@@ -3797,8 +5200,27 @@ with tab_approach:
             st.dataframe(prox_compare, use_container_width=True, hide_index=True)
         else:
             st.info("No filtered proximity distribution available.")
+
+        st.markdown("##### Best Clubs")
+        best_club_min_attempts = st.slider("Minimum attempts for Best Clubs", 1, 20, 3, 1, key="analysis_best_club_min")
+        best_clubs_df = summarize_approach_by_club(analysis_all_player_view, min_attempts=best_club_min_attempts)
+        if not best_clubs_df.empty:
+            best_clubs_df = best_clubs_df.rename(columns={"Pct": "GIR %", "AvgProx": "Avg Prox"})
+            st.dataframe(best_clubs_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No club rows qualify for Best Clubs with the current filters.")
+
+        st.markdown("##### Best Yardage Windows")
+        best_yard_min_attempts = st.slider("Minimum attempts for Best Yardage Windows", 1, 20, 3, 1, key="analysis_best_yard_min")
+        best_yard_df = summarize_approach_by_bucket(analysis_all_player_view)
+        if not best_yard_df.empty:
+            best_yard_df = best_yard_df[pd.to_numeric(best_yard_df["Attempts"], errors="coerce").fillna(0) >= best_yard_min_attempts].copy()
+            best_yard_df = best_yard_df.sort_values(["Pct", "Attempts", "Bucket"], ascending=[False, False, True]).rename(columns={"Pct": "GIR %", "AvgProx": "Avg Prox"})
+            st.dataframe(best_yard_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No yardage rows qualify for Best Yardage Windows with the current filters.")
     else:
-        st.info("No approach filter-view data available.")
+        st.info("No analysis filter-view data available.")
 
     st.markdown("#### Shot Pattern Dashboard")
     shot_options_base = build_shot_pattern_frame(df, player)
@@ -3806,21 +5228,23 @@ with tab_approach:
         sp1, sp2, sp3 = st.columns(3)
         with sp1:
             shot_bucket_options = [b for b in APPROACH_BUCKET_ORDER if b in shot_options_base["Approach Bucket"].dropna().astype(str).tolist()]
-            shot_buckets = st.multiselect("Distance Bucket Filter", shot_bucket_options, default=[], key="shot_bucket_filter_multi")
+            shot_buckets = st.multiselect("Distance Bucket Filter", shot_bucket_options, default=[], key="analysis_shot_bucket_filter_multi")
         with sp2:
             club_vals = sorted([c for c in shot_options_base["Approach Club"].dropna().unique().tolist() if str(c).strip() != ""])
-            shot_clubs = st.multiselect("Club Filter", club_vals, default=[], key="shot_club_filter_multi")
+            shot_clubs = st.multiselect("Club Filter", club_vals, default=[], key="analysis_shot_club_filter_multi")
         with sp3:
             course_vals = sorted([c for c in shot_options_base["Course Name"].dropna().unique().tolist()]) if "Course Name" in shot_options_base else []
-            shot_courses = st.multiselect("Course Filter", course_vals, default=[], key="shot_course_filter_multi")
+            shot_courses = st.multiselect("Course Filter", course_vals, default=[], key="analysis_shot_course_filter_multi")
 
-        sp4, sp5 = st.columns(2)
+        sp4, sp5, sp6 = st.columns(3)
         with sp4:
             fairway_labels = {1: "Fairway Hit", 0: "Fairway Miss"}
-            shot_fairway_labels = st.multiselect("Fairway Filter", list(fairway_labels.values()), default=[], key="shot_fairway_filter_multi")
+            shot_fairway_labels = st.multiselect("Fairway Filter", list(fairway_labels.values()), default=[], key="analysis_shot_fairway_filter_multi")
             shot_fairway_vals = [k for k, v in fairway_labels.items() if v in shot_fairway_labels]
         with sp5:
-            shot_pars = st.multiselect("Hole Par Filter", [3,4,5], default=[], key="shot_par_filter_multi")
+            shot_pars = st.multiselect("Hole Par Filter", [3,4,5], default=[], key="analysis_shot_par_filter_multi")
+        with sp6:
+            shot_gir_mode = st.selectbox("GIR Filter", ["All", "GIR Only", "Missed GIR Only"], index=0, key="analysis_shot_gir_mode")
 
         round_shot_view = apply_approach_filters(
             round_data,
@@ -3829,6 +5253,7 @@ with tab_approach:
             courses=shot_courses,
             fairway_vals=shot_fairway_vals,
             par_vals=shot_pars,
+            gir_mode=shot_gir_mode,
         )
         bench_shot_view = apply_approach_filters(
             benchmark_df,
@@ -3837,6 +5262,7 @@ with tab_approach:
             courses=shot_courses,
             fairway_vals=shot_fairway_vals,
             par_vals=shot_pars,
+            gir_mode=shot_gir_mode,
         )
 
         if not round_shot_view.empty or not bench_shot_view.empty:
@@ -3898,25 +5324,31 @@ with tab_approach:
     else:
         st.info("No shot pattern data available for this player.")
 
-    approach_debug = prepare_approach_frame(round_data).copy()
-    if not approach_debug.empty:
-        approach_debug = approach_debug.sort_values("Hole")[[
-            "Hole", "Approach Club", "Approach Distance", "Approach Bucket",
-            "Approach GIR Flag", "Approach Miss Direction Clean", "Approach Proximity"
-        ]].rename(columns={
-            "Approach Club": "Club",
-            "Approach Distance": "Distance",
-            "Approach Bucket": "Bucket",
-            "Approach GIR Flag": "Approach GIR",
-            "Approach Miss Direction Clean": "Miss Dir",
-            "Approach Proximity": "Prox"
-        })
-    render_debug_section("🔎 Debug: Approach rows used in calculations", approach_debug)
-
 with tab_putting:
     st.markdown("### 🏌️ Putting Breakdown")
     compare_mode_putt = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="putting_compare_mode")
     benchmark_df_putt = build_benchmark_df(df, round_data, compare_mode_putt)
+
+    putt_overlay_mode = st.radio(
+        "Putting chart overlay:",
+        ["None", "This Player (All Data in Current Filters)", "Another Player"],
+        horizontal=True,
+        key="putt_overlay_mode"
+    )
+
+    overlay_player_name = None
+    overlay_label = None
+    overlay_frame = pd.DataFrame()
+
+    if putt_overlay_mode == "This Player (All Data in Current Filters)":
+        overlay_frame = df[df["Player Name"] == player].copy() if "Player Name" in df.columns else pd.DataFrame()
+        overlay_label = f"{player} Overall"
+    elif putt_overlay_mode == "Another Player":
+        player_options = sorted([x for x in df["Player Name"].dropna().unique().tolist() if str(x).strip() != "" and str(x) != str(player)])
+        if player_options:
+            overlay_player_name = st.selectbox("Overlay player", player_options, key="putt_overlay_player")
+            overlay_frame = df[df["Player Name"] == overlay_player_name].copy()
+            overlay_label = overlay_player_name
 
     round_putt = prepare_putting_frame(round_data)
     bench_putt = prepare_putting_frame(benchmark_df_putt)
@@ -4088,6 +5520,36 @@ with tab_putting:
     else:
         st.info("No usable putting bucket data found for this round / comparison group.")
 
+    st.markdown("#### Make % by Distance")
+    if not round_putt_bucket.empty:
+        render_putting_distance_line_chart(
+            round_putt_bucket,
+            PUTT_BUCKET_ORDER,
+            title="Attempts by Distance + Make %",
+            value_col="Pct",
+            made_col="Made",
+            attempts_col="Attempts",
+            value_label="1-Putt %",
+            good_metric=True,
+        )
+    else:
+        st.info("No usable make-by-distance data found for this round.")
+
+    st.markdown("#### 3-Putt % by Distance")
+    if not round_three_putt_bucket.empty:
+        render_putting_distance_line_chart(
+            round_three_putt_bucket,
+            PUTT_BUCKET_ORDER,
+            title="Attempts by Distance + 3-Putt %",
+            value_col="Pct",
+            made_col="Made",
+            attempts_col="Attempts",
+            value_label="3-Putt %",
+            good_metric=False,
+        )
+    else:
+        st.info("No usable 3-putt-by-distance data found for this round.")
+
     with st.expander("🔎 Debug: Putting SG vs Baseline", expanded=False):
         st.write({
             "compare_mode": compare_mode_putt,
@@ -4111,7 +5573,470 @@ with tab_putting:
         })
     render_debug_section("🔎 Debug: Putting rows used in calculations", putting_debug)
 
+    st.markdown("#### Overlay — Putting Make % by Distance")
+    round_putt_bucket = summarize_putting_by_bucket(round_data)
+    render_putting_distance_line_chart(round_putt_bucket, PUTT_BUCKET_ORDER, title="Attempts by Distance + Make %", value_col="Pct", made_col="Made", attempts_col="Attempts", value_label="Make %", good_metric=True)
+    if putt_overlay_mode != "None" and overlay_label:
+        overlay_make_df = summarize_putting_by_bucket(overlay_frame)
+        render_putting_overlay_line_chart(round_putt_bucket, overlay_make_df, PUTT_BUCKET_ORDER, title="Make % Overlay", value_col="Pct", primary_name="This Round", overlay_name=overlay_label)
+
+    st.markdown("#### Overlay — 3-Putt % by Distance")
+    three_putt_bucket_df = summarize_three_putt_by_bucket(round_data)
+    render_putting_distance_line_chart(three_putt_bucket_df, PUTT_BUCKET_ORDER, title="Attempts by Distance + 3-Putt %", value_col="Pct", made_col="Made", attempts_col="Attempts", value_label="3-Putt %", good_metric=False)
+    if putt_overlay_mode != "None" and overlay_label:
+        overlay_three_df = summarize_three_putt_by_bucket(overlay_frame)
+        render_putting_overlay_line_chart(three_putt_bucket_df, overlay_three_df, PUTT_BUCKET_ORDER, title="3-Putt % Overlay", value_col="Pct", primary_name="This Round", overlay_name=overlay_label)
+
+
+with tab_trends:
+    st.markdown("### 📈 Player Trends")
+    st.caption("Long-term performance view across rounds, with rolling averages and quick trend callouts. Filters can be combined — for example, one course inside one month inside one year.")
+
+    trends_player = player if "player" in locals() else (selected_player if "selected_player" in locals() and selected_player else None)
+    if trends_player and "Player Name" in df.columns:
+        trends_source = df[df["Player Name"] == trends_player].copy()
+    else:
+        trends_source = filtered_df.copy() if "filtered_df" in locals() else df.copy()
+
+    # Combined filters for trend analysis
+    trends_source["Date Played"] = pd.to_datetime(_safe_col(trends_source, "Date Played", pd.NaT), errors="coerce")
+    if "Month" not in trends_source.columns:
+        trends_source["Month"] = trends_source["Date Played"].dt.strftime("%B")
+    if "Year" not in trends_source.columns:
+        trends_source["Year"] = trends_source["Date Played"].dt.year
+
+    tf1, tf2, tf3 = st.columns(3)
+    with tf1:
+        trend_year_options = sorted([int(x) for x in trends_source["Year"].dropna().unique().tolist()]) if "Year" in trends_source.columns else []
+        trend_years = st.multiselect("Year Filter", trend_year_options, default=[], key="trend_years_filter")
+    with tf2:
+        month_order = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+        trend_month_options = [m for m in month_order if m in trends_source["Month"].dropna().astype(str).unique().tolist()] if "Month" in trends_source.columns else []
+        trend_months = st.multiselect("Month Filter", trend_month_options, default=[], key="trend_months_filter")
+    with tf3:
+        trend_course_options = sorted([str(x) for x in trends_source["Course Name"].dropna().unique().tolist()]) if "Course Name" in trends_source.columns else []
+        trend_courses = st.multiselect("Course Filter", trend_course_options, default=[], key="trend_courses_filter")
+
+    if trend_years:
+        trends_source = trends_source[trends_source["Year"].isin(trend_years)].copy()
+    if trend_months:
+        trends_source = trends_source[trends_source["Month"].astype(str).isin(trend_months)].copy()
+    if trend_courses:
+        trends_source = trends_source[trends_source["Course Name"].astype(str).isin(trend_courses)].copy()
+
+    trend_df = build_trends_round_frame(trends_source)
+
+    if trend_df.empty:
+        st.info("No round-based trend data available yet.")
+    else:
+        render_trends_summary_cards(trend_df)
+        st.caption(f"Rounds in trend view: {len(trend_df)}")
+        st.caption("Current strengths compare the latest filtered round against the average of all currently filtered rounds.")
+
+        t1, t2 = st.columns(2)
+        with t1:
+            render_trend_line_chart(trend_df, "ScorePer18", "ScorePer18_Roll5", "Score / 18 Trend", "Score / 18", lower_better=True)
+        with t2:
+            render_trend_line_chart(trend_df, "PuttsPer18", "PuttsPer18_Roll5", "Putts / 18 Trend", "Putts / 18", lower_better=True)
+
+        t3, t4 = st.columns(2)
+        with t3:
+            render_trend_line_chart(trend_df, "GIRPct", "GIRPct_Roll5", "GIR % Trend", "GIR %", lower_better=False)
+        with t4:
+            render_trend_line_chart(trend_df, "FWPct", "FWPct_Roll5", "Fairway % Trend", "Fairway %", lower_better=False)
+
+        t5, t6 = st.columns(2)
+        with t5:
+            render_trend_line_chart(trend_df, "BirdieRate", "BirdieRate_Roll5", "Birdie Rate Trend", "Birdie Rate %", lower_better=False)
+        with t6:
+            render_trend_line_chart(trend_df, "ScramblePct", "ScramblePct_Roll5", "Scramble % Trend", "Scramble %", lower_better=False)
+
+        trend_insights = build_trends_insights(trend_df)
+        trend_strengths = build_trends_strengths(trend_df)
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            strength_html = "<br>".join([f"• {x}" for x in trend_strengths])
+            st.markdown(
+                f"""
+                <div style="background:#1e2930; border:1px solid rgba(113,199,236,.20); border-radius:12px; padding:12px 14px; line-height:1.6;">
+                  <b>💪 Current strengths</b><br>
+                  {strength_html}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        with s2:
+            good_html = "<br>".join([f"• {x}" for x in trend_insights["good"]])
+            st.markdown(
+                f"""
+                <div style="background:#1f2c25; border:1px solid rgba(100,223,181,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+                  <b>✅ Most improved lately</b><br>
+                  {good_html}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        with s3:
+            watch_html = "<br>".join([f"• {x}" for x in trend_insights["watch"]])
+            st.markdown(
+                f"""
+                <div style="background:#2d2323; border:1px solid rgba(238,108,77,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+                  <b>👀 Needs attention</b><br>
+                  {watch_html}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        st.markdown("#### Trend Data")
+        trend_table = trend_df[["Date", "Round", "ScorePer18", "PuttsPer18", "GIRPct", "FWPct", "BirdieRate", "ScramblePct", "UpDownPct"]].copy()
+        trend_table = trend_table.rename(columns={
+            "ScorePer18": "Score / 18",
+            "PuttsPer18": "Putts / 18",
+            "GIRPct": "GIR %",
+            "FWPct": "FW %",
+            "BirdieRate": "Birdie Rate %",
+            "ScramblePct": "Scramble %",
+            "UpDownPct": "Up & Down %",
+        })
+        st.dataframe(trend_table, use_container_width=True, hide_index=True)
+
+
+
+
+
+
+
+def build_bestof_counts_summary(frame):
+    d = frame.copy()
+    if d is None or d.empty:
+        return pd.DataFrame(columns=["Metric", "Count"])
+
+    score_labels = _safe_col(d, "Score Label", "").fillna("").astype(str)
+    putts = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0)
+    gir = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0)
+    fw = pd.to_numeric(_safe_col(d, "Fairway", 0), errors="coerce").fillna(0)
+    par = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+    scramble = pd.to_numeric(_safe_col(d, "Scramble", 0), errors="coerce").fillna(0)
+    seve = pd.to_numeric(_safe_col(d, "Seve", 0), errors="coerce").fillna(0)
+    arnie = pd.to_numeric(_safe_col(d, "Arnie", 0), errors="coerce").fillna(0)
+    lost_balls = (
+        pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0)
+        + pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0)
+    )
+
+    fw_block = d[par.isin([4, 5])] if "Par" in d.columns else d.iloc[0:0]
+    hole_outs = build_short_game_hole_out_stats(d).get("count", 0)
+    three_putt_bogeys = int(pd.to_numeric(_safe_col(d, "3 Putt Bogey", 0), errors="coerce").fillna(0).sum())
+
+    rows = [
+        ("Albatross", int(score_labels.eq("Albatross").sum())),
+        ("Eagles", int(score_labels.eq("Eagle").sum())),
+        ("Birdies", int(score_labels.eq("Birdie").sum())),
+        ("Pars", int(score_labels.eq("Par").sum())),
+        ("Bogeys", int(score_labels.eq("Bogey").sum())),
+        ("Double+", int(score_labels.isin(["Double Bogey", "Triple Bogey +"]).sum())),
+        ("GIR", int(gir.sum())),
+        ("Fairways", int(pd.to_numeric(_safe_col(fw_block, "Fairway", 0), errors="coerce").fillna(0).sum()) if len(fw_block) else 0),
+        ("1 Putts", int((putts == 1).sum())),
+        ("3+ Putts", int((putts >= 3).sum())),
+        ("3 Putt Bogeys", three_putt_bogeys),
+        ("Scrambles", int(scramble.sum())),
+        ("Arnies", int(arnie.sum())),
+        ("Seves", int(seve.sum())),
+        ("Hole Outs", int(hole_outs)),
+        ("Lost Balls", int(lost_balls.sum())),
+    ]
+    return pd.DataFrame(rows, columns=["Metric", "Count"])
+
+def render_bestof_counts_summary(df_counts, title="Filtered Summary Counts"):
+    import streamlit.components.v1 as components
+
+    if df_counts is None or df_counts.empty:
+        st.info("No count summary available.")
+        return
+
+    left = df_counts.iloc[: (len(df_counts)+1)//2].copy()
+    right = df_counts.iloc[(len(df_counts)+1)//2 :].copy()
+
+    def _rows(block):
+        html = ""
+        for _, r in block.iterrows():
+            html += f"""
+            <div class="boc-row">
+              <div class="boc-m">{r['Metric']}</div>
+              <div class="boc-c">{int(r['Count'])}</div>
+            </div>
+            """
+        return html
+
+    html = f"""
+    <style>
+      .boc-card {{
+        background: linear-gradient(180deg,#2a2a2a 0%, #202020 100%);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 14px;
+        padding: 10px 12px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.16);
+        margin-bottom: 10px;
+        font-family: Segoe UI, Roboto, Arial, sans-serif;
+      }}
+      .boc-title {{
+        font-size: 14px;
+        font-weight: 800;
+        color: #fff;
+        margin-bottom: 8px;
+      }}
+      .boc-grid {{
+        display:grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }}
+      .boc-row {{
+        display:flex;
+        justify-content:space-between;
+        gap:8px;
+        padding: 5px 0;
+        border-top:1px solid rgba(255,255,255,.05);
+      }}
+      .boc-row:first-child {{ border-top:none; }}
+      .boc-m {{
+        color:#d7d7d7;
+        font-size:11.5px;
+        font-weight:700;
+      }}
+      .boc-c {{
+        color:#fff;
+        font-size:11.5px;
+        font-weight:800;
+        font-variant-numeric: tabular-nums;
+      }}
+    </style>
+    <div class="boc-card">
+      <div class="boc-title">{title}</div>
+      <div class="boc-grid">
+        <div>{_rows(left)}</div>
+        <div>{_rows(right)}</div>
+      </div>
+    </div>
+    """
+    height = 60 + max(len(left), len(right)) * 28
+    components.html(html, height=height, scrolling=False)
+
+def render_bestof_compact_table(title, df_table):
+    import streamlit.components.v1 as components
+
+    if df_table is None or df_table.empty:
+        st.info("No rows for this metric.")
+        return
+
+    show_score = "Score" in df_table.columns and title != "Best Scoring Rounds"
+    rows_html = ""
+    for i, row in df_table.reset_index(drop=True).iterrows():
+        rank = i + 1
+        date = str(row.get("Date", ""))
+        player = str(row.get("Player", ""))
+        course = str(row.get("Course", ""))
+        stat = str(row.get("Stat", row.get("Round Score", row.get("Value", ""))))
+        score = str(row.get("Score", ""))
+
+        meta = f"{date} • {player} • {course}"
+        if title == "Best Scoring Rounds":
+            meta = f"{date} • {player} • {course} • {stat}"
+            stat = ""
+        rows_html += f"""
+        <div class="bo-row">
+          <div class="bo-rank">{rank}</div>
+          <div class="bo-main">
+            {"<div class='bo-stat'>" + stat + "</div>" if stat else ""}
+            <div class="bo-meta">{meta}</div>
+          </div>
+          {"<div class='bo-score'>" + score + "</div>" if show_score else ""}
+        </div>
+        """
+
+    html = f"""
+    <style>
+      .bo-card {{
+        background: linear-gradient(180deg,#2a2a2a 0%, #202020 100%);
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 14px;
+        padding: 10px 10px 6px 10px;
+        box-shadow: 0 8px 18px rgba(0,0,0,.16);
+        margin-bottom: 10px;
+        font-family: Segoe UI, Roboto, Arial, sans-serif;
+      }}
+      .bo-title {{
+        font-size: 14px;
+        font-weight: 800;
+        color: #fff;
+        margin-bottom: 6px;
+      }}
+      .bo-row {{
+        display:grid;
+        grid-template-columns: 28px 1fr 88px;
+        gap: 8px;
+        align-items:center;
+        padding: 6px 0;
+        border-top: 1px solid rgba(255,255,255,.06);
+      }}
+      .bo-row:first-of-type {{ border-top:none; padding-top:2px; }}
+      .bo-rank {{
+        width: 22px; height: 22px; border-radius: 999px;
+        background:#3a3a3a; color:#fff; font-size:11px; font-weight:800;
+        display:flex; align-items:center; justify-content:center;
+      }}
+      .bo-main {{ min-width: 0; }}
+      .bo-stat {{
+        color:#fff; font-size:12px; font-weight:800; line-height:1.15;
+        margin-bottom:2px;
+      }}
+      .bo-meta {{
+        color:#bdbdbd; font-size:10.5px; line-height:1.2;
+        white-space:normal;
+      }}
+      .bo-score {{
+        color:#fff; font-size:11px; font-weight:800;
+        text-align:right; white-space:nowrap;
+        font-variant-numeric: tabular-nums;
+      }}
+    </style>
+    <div class="bo-card">
+      <div class="bo-title">{title}</div>
+      {rows_html}
+    </div>
+    """
+    height = 48 + (len(df_table) * 46)
+    components.html(html, height=height, scrolling=False)
+
+with tab_bestof:
+    st.markdown("### 🏆 Best Of")
+    st.caption("Top round performances for key stats. Only 18-hole rounds are included so comparisons stay clean. Filters can be combined by player, year, month, and course.")
+
+    lb_source = df.copy()
+    lb_source["Date Played"] = pd.to_datetime(_safe_col(lb_source, "Date Played", pd.NaT), errors="coerce")
+    if "Month" not in lb_source.columns:
+        lb_source["Month"] = lb_source["Date Played"].dt.strftime("%B")
+    if "Year" not in lb_source.columns:
+        lb_source["Year"] = lb_source["Date Played"].dt.year
+
+    l1, l2, l3, l4 = st.columns(4)
+    with l1:
+        lb_players = sorted([str(x) for x in lb_source["Player Name"].dropna().unique().tolist()]) if "Player Name" in lb_source.columns else []
+        lb_player_filter = st.multiselect("Player Filter", lb_players, default=[player] if "player" in locals() and player in lb_players else [], key="lb_player_filter")
+    with l2:
+        lb_years = sorted([int(x) for x in lb_source["Year"].dropna().unique().tolist()]) if "Year" in lb_source.columns else []
+        lb_year_filter = st.multiselect("Year Filter", lb_years, default=[], key="lb_year_filter")
+    with l3:
+        month_order = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+        lb_months = [m for m in month_order if m in lb_source["Month"].dropna().astype(str).unique().tolist()] if "Month" in lb_source.columns else []
+        lb_month_filter = st.multiselect("Month Filter", lb_months, default=[], key="lb_month_filter")
+    with l4:
+        lb_courses = sorted([str(x) for x in lb_source["Course Name"].dropna().unique().tolist()]) if "Course Name" in lb_source.columns else []
+        lb_course_filter = st.multiselect("Course Filter", lb_courses, default=[], key="lb_course_filter")
+
+    if lb_player_filter:
+        lb_source = lb_source[lb_source["Player Name"].astype(str).isin(lb_player_filter)].copy()
+    if lb_year_filter:
+        lb_source = lb_source[lb_source["Year"].isin(lb_year_filter)].copy()
+    if lb_month_filter:
+        lb_source = lb_source[lb_source["Month"].astype(str).isin(lb_month_filter)].copy()
+    if lb_course_filter:
+        lb_source = lb_source[lb_source["Course Name"].astype(str).isin(lb_course_filter)].copy()
+
+    lb_rounds = build_round_leaderboard_frame(lb_source)
+
+    if lb_rounds.empty:
+        st.info("No 18-hole round data available for the current filters.")
+    else:
+        st.caption(f"18-hole rounds in Best Of view: {len(lb_rounds)}")
+
+        summary_counts_df = build_bestof_counts_summary(lb_source)
+        render_bestof_counts_summary(summary_counts_df, title="Filtered Summary Counts")
+
+        metrics = [
+            ("Best Scoring Rounds", "ScoreToPar", True, "ScoreDisplay"),
+            ("Best GIR", "GIRPct", False, "GIRDisplay"),
+            ("Best Fairway", "FWPct", False, "FWDisplay"),
+            ("Best Putts / 18", "PuttsPer18", True, "PuttsDisplay"),
+            ("Most 1 Putts", "OnePutts", False, "OnePuttsDisplay"),
+            ("Most 3+ Putts", "ThreePuttPlus", False, "ThreePuttPlusDisplay"),
+            ("Most 3 Putt + Bogeys", "ThreePuttBogeys", False, "ThreePuttBogeysDisplay"),
+            ("Best Birdie Rate", "BirdieRate", False, "BirdieDisplay"),
+            ("Best Scramble", "ScramblePct", False, "ScrambleDisplay"),
+            ("Best Up & Down", "UpDownPct", False, "UpDownDisplay"),
+            ("Most Arnies", "Arnies", False, "ArniesDisplay"),
+            ("Most Seves", "Seves", False, "SevesDisplay"),
+            ("Most Hole Outs", "HoleOuts", False, "HoleOutsDisplay"),
+            ("Longest Par-or-Better Streak", "ParOrBetterStreak", False, None),
+            ("Longest Birdie-or-Better Streak", "BirdieBetterStreak", False, None),
+            ("Most Pars", "ParCount", False, "ParDisplay"),
+            ("Most Bogeys", "BogeyCount", False, "BogeyDisplay"),
+            ("Most Double+", "DoublePlusCount", False, "DoublePlusDisplay"),
+            ("Most Lost Balls", "LostBalls", False, "LostBallsDisplay"),
+        ]
+
+        cols = st.columns(2)
+        
+        for idx, (title, col, lower_better, display_col) in enumerate(metrics):
+            with cols[idx % 2]:
+                st.markdown(f"#### {title}")
+                top_df = get_top_rounds(lb_rounds, col, n=5, lower_better=lower_better, display_col=display_col).copy()
+                if not top_df.empty:
+                    top_df = _style_bestof_table(top_df, title=title)
+
+                    if title == "Best Scoring Rounds":
+                        top_df = top_df.drop(columns=["Score"], errors="ignore")
+                        top_df = top_df.rename(columns={"Value": "Round Score"})
+                        display_cols = [c for c in ["Date", "Player", "Course", "Round Score"] if c in top_df.columns]
+                    else:
+                        top_df = top_df.rename(columns={"Value": "Stat", "Score": "Score"})
+                        if "Score" not in top_df.columns:
+                            top_df["Score"] = ""
+                        display_cols = [c for c in ["Date", "Player", "Course", "Stat", "Score"] if c in top_df.columns]
+
+                    top_df = top_df.loc[:, display_cols].copy()
+
+                    render_bestof_compact_table(title, top_df)
+                else:
+                    st.info("No rows for this metric.")
+
+        st.markdown("### 👎 Worst Of")
+        worst_metrics = [
+            ("Worst Scoring Rounds", "ScoreToPar", False, "ScoreDisplay"),
+            ("Worst GIR", "GIRPct", True, "GIRDisplay"),
+            ("Worst Fairway", "FWPct", True, "FWDisplay"),
+            ("Worst Putts / 18", "PuttsPer18", False, "PuttsDisplay"),
+            ("Most 3+ Putts", "ThreePuttPlus", False, "ThreePuttPlusDisplay"),
+            ("Most 3 Putt Bogeys", "ThreePuttBogeys", False, "ThreePuttBogeysDisplay"),
+            ("Most Lost Balls", "LostBalls", False, "LostBallsDisplay"),
+        ]
+
+        wcols = st.columns(2)
+        for widx, (title, col, lower_better, display_col) in enumerate(worst_metrics):
+            with wcols[widx % 2]:
+                top_df = get_top_rounds(lb_rounds, col, n=5, lower_better=lower_better, display_col=display_col).copy()
+                if not top_df.empty:
+                    top_df = _style_bestof_table(top_df, title=title)
+                    if title == "Worst Scoring Rounds":
+                        top_df = top_df.drop(columns=["Score"], errors="ignore")
+                        top_df = top_df.rename(columns={"Value": "Round Score"})
+                        display_cols = [c for c in ["Date", "Player", "Course", "Round Score"] if c in top_df.columns]
+                    else:
+                        top_df = top_df.rename(columns={"Value": "Stat", "Score": "Score"})
+                        if "Score" not in top_df.columns:
+                            top_df["Score"] = ""
+                        display_cols = [c for c in ["Date", "Player", "Course", "Stat", "Score"] if c in top_df.columns]
+                    top_df = top_df.loc[:, display_cols].copy()
+                    render_bestof_compact_table(title, top_df)
+                else:
+                    st.info("No rows for this metric.")
+
+
 with tab_shortgame:
+
+
     st.markdown("### ⛳ Short Game / Chipping Breakdown")
     compare_mode_sg = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="shortgame_compare_mode")
     benchmark_df_sg = build_benchmark_df(df, round_data, compare_mode_sg)
