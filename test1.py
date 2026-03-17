@@ -247,17 +247,24 @@ def _normalize_direction(val):
     }
     return mapping.get(key, s)
 
-def build_benchmark_df(full_df, round_df, mode):
-    player = round_df["Player Name"].iloc[0] if "Player Name" in round_df else None
-    course = round_df["Course Name"].iloc[0] if "Course Name" in round_df else None
-    round_date = pd.to_datetime(round_df["Date Played"].iloc[0], errors="coerce")
+def build_benchmark_df(full_df, round_df, mode, selected_round_ids=None):
+    player = round_df["Player Name"].iloc[0] if "Player Name" in round_df and not round_df.empty else None
+    course = round_df["Course Name"].iloc[0] if "Course Name" in round_df and not round_df.empty else None
+    round_date = pd.to_datetime(round_df["Date Played"].iloc[0], errors="coerce") if ("Date Played" in round_df and not round_df.empty) else pd.NaT
     year = int(round_date.year) if pd.notna(round_date) else None
     month = int(round_date.month) if pd.notna(round_date) else None
 
     base = full_df.copy()
+
+    # Custom selected-round baselines should respect the exact chosen rounds,
+    # including rounds from other players.
+    if mode == "Selected Rounds":
+        if selected_round_ids and "Round Link" in base.columns:
+            return base[base["Round Link"].isin(selected_round_ids)].copy()
+        return base.iloc[0:0].copy()
+
     if player and "Player Name" in base:
         base = base[base["Player Name"] == player]
-
     if mode == "All Time":
         return base
     elif mode == "Same Year":
@@ -267,6 +274,13 @@ def build_benchmark_df(full_df, round_df, mode):
     elif mode == "Same Course":
         return base[base["Course Name"] == course]
     return base
+
+def _compare_mode_options():
+    return ["All Time", "Same Year", "Same Month", "Same Course", "Selected Rounds"]
+
+
+def _compare_mode_display_label(mode):
+    return "Selected Rounds Avg" if mode == "Selected Rounds" else mode
 
 def build_compare_long(round_summary, bench_summary, key_col, round_label="Round", bench_label="Baseline"):
     r = round_summary.copy()
@@ -584,6 +598,7 @@ def _baseline_label(mode, per18=False):
         "Same Year": "Year Avg",
         "Same Month": "Month Avg",
         "Same Course": "Course Avg",
+        "Selected Rounds": "Selected Rounds Avg",
     }
     base = mapping.get(mode, mode)
     return f"{base} (Per 18)" if per18 else base
@@ -1450,6 +1465,104 @@ def render_single_series_bars(summary_df, key_col, key_order, title, bar_label="
     components.html(html, height=height_px, scrolling=False)
 
 
+def build_baseline_summary(frame, compare_mode="Baseline"):
+    d = frame.copy()
+    if d is None or d.empty:
+        return {
+            "rounds": 0,
+            "players": 0,
+            "courses": 0,
+            "avg_score": None,
+            "avg_to_par": None,
+            "date_start": None,
+            "date_end": None,
+            "player_list": [],
+            "course_list": [],
+            "label": _compare_mode_display_label(compare_mode),
+        }
+
+    d["Date Played"] = pd.to_datetime(_safe_col(d, "Date Played", pd.NaT), errors="coerce")
+    d["Hole Score"] = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+    d["Par"] = pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+
+    round_col = _resolve_round_col(d)
+    rounds = int(d[round_col].dropna().nunique()) if round_col and round_col in d.columns else 1
+    players = sorted([str(x) for x in _safe_col(d, "Player Name", "").dropna().astype(str).unique().tolist() if str(x).strip()])
+    courses = sorted([str(x) for x in _safe_col(d, "Course Name", "").dropna().astype(str).unique().tolist() if str(x).strip()])
+
+    avg_score = None
+    avg_to_par = None
+    if round_col and round_col in d.columns:
+        per_round = d.groupby(round_col, dropna=True).agg(
+            Score=("Hole Score", "sum"),
+            ParTotal=("Par", "sum")
+        )
+        if not per_round.empty:
+            avg_score = float(per_round["Score"].mean())
+            avg_to_par = float((per_round["Score"] - per_round["ParTotal"]).mean())
+    else:
+        avg_score = float(d["Hole Score"].sum())
+        avg_to_par = float(d["Hole Score"].sum() - d["Par"].sum())
+
+    return {
+        "rounds": rounds,
+        "players": len(players),
+        "courses": len(courses),
+        "avg_score": avg_score,
+        "avg_to_par": avg_to_par,
+        "date_start": d["Date Played"].min() if "Date Played" in d.columns else None,
+        "date_end": d["Date Played"].max() if "Date Played" in d.columns else None,
+        "player_list": players,
+        "course_list": courses,
+        "label": _compare_mode_display_label(compare_mode),
+    }
+
+
+def render_baseline_summary_box(summary):
+    label = summary.get("label", "Baseline")
+    rounds = int(summary.get("rounds", 0) or 0)
+    players = int(summary.get("players", 0) or 0)
+    courses = int(summary.get("courses", 0) or 0)
+    avg_score = summary.get("avg_score")
+    avg_to_par = summary.get("avg_to_par")
+    ds = summary.get("date_start")
+    de = summary.get("date_end")
+    player_list = summary.get("player_list", [])[:4]
+    course_list = summary.get("course_list", [])[:4]
+
+    date_txt = "—"
+    if pd.notna(ds) and pd.notna(de):
+        ds = pd.to_datetime(ds)
+        de = pd.to_datetime(de)
+        date_txt = f"{ds.month}/{ds.day}/{ds.year} → {de.month}/{de.day}/{de.year}"
+
+    score_txt = "—" if avg_score is None or pd.isna(avg_score) else f"{avg_score:.1f}"
+    to_par_txt = "—" if avg_to_par is None or pd.isna(avg_to_par) else _fmt_par_float(avg_to_par)
+    players_txt = ", ".join(player_list) if player_list else "—"
+    if len(summary.get("player_list", [])) > 4:
+        players_txt += " …"
+    courses_txt = ", ".join(course_list) if course_list else "—"
+    if len(summary.get("course_list", [])) > 4:
+        courses_txt += " …"
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:12px 14px; margin:6px 0 12px 0; box-shadow:0 8px 18px rgba(0,0,0,.16);">
+      <div style="font-size:13px; font-weight:800; color:#fff; margin-bottom:8px;">🧱 Baseline Summary — {label}</div>
+      <div style="display:grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap:10px; margin-bottom:8px;">
+        <div><div style="font-size:11px; color:#a9a9a9; font-weight:700;">Rounds</div><div style="font-size:21px; color:#fff; font-weight:900;">{rounds}</div></div>
+        <div><div style="font-size:11px; color:#a9a9a9; font-weight:700;">Avg Score</div><div style="font-size:21px; color:#fff; font-weight:900;">{score_txt}</div></div>
+        <div><div style="font-size:11px; color:#a9a9a9; font-weight:700;">Avg To Par</div><div style="font-size:21px; color:#fff; font-weight:900;">{to_par_txt}</div></div>
+        <div><div style="font-size:11px; color:#a9a9a9; font-weight:700;">Players / Courses</div><div style="font-size:21px; color:#fff; font-weight:900;">{players} / {courses}</div></div>
+      </div>
+      <div style="font-size:12px; color:#d8d8d8; line-height:1.45;">
+        <b>Date Range:</b> {date_txt}<br>
+        <b>Players:</b> {players_txt}<br>
+        <b>Courses:</b> {courses_txt}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def build_round_selector_df(src_df):
     work = src_df.copy()
     work["Date Played"] = pd.to_datetime(work["Date Played"], errors="coerce")
@@ -1569,6 +1682,211 @@ def render_direction_heatmap(round_dir_df):
     txt = base.mark_text(fontWeight="bold").encode(text="Label:N")
     st.altair_chart((rects + txt).properties(height=260), use_container_width=True)
 
+
+def _miss_bias_summary(dir_df):
+    if dir_df is None or dir_df.empty:
+        return {
+            "left_count": 0, "right_count": 0, "short_count": 0, "long_count": 0,
+            "diag_left_count": 0, "diag_right_count": 0,
+            "left_pct": 0.0, "right_pct": 0.0, "short_pct": 0.0, "long_pct": 0.0,
+            "diag_left_pct": 0.0, "diag_right_pct": 0.0,
+            "top_direction": None, "top_pct": 0.0, "total": 0,
+            "left_family": "Short Left + Left + Long Left",
+            "right_family": "Short Right + Right + Long Right",
+            "short_family": "Short Left + Short + Short Right",
+            "long_family": "Long Left + Long + Long Right",
+        }
+
+    work = dir_df.copy()
+    work["Direction"] = work["Direction"].astype(str)
+    work["Count"] = pd.to_numeric(work.get("Count"), errors="coerce").fillna(0)
+    total_count = int(work["Count"].sum())
+    total = float(total_count) if total_count > 0 else 1.0
+
+    def _contains(word):
+        return work["Direction"].str.contains(word, case=False, na=False)
+
+    left = int(work.loc[_contains("left"), "Count"].sum())
+    right = int(work.loc[_contains("right"), "Count"].sum())
+    short = int(work.loc[_contains("short"), "Count"].sum())
+    longv = int(work.loc[_contains("long"), "Count"].sum())
+    diag_left = int(work.loc[_contains("short left") | _contains("long left"), "Count"].sum())
+    diag_right = int(work.loc[_contains("short right") | _contains("long right"), "Count"].sum())
+
+    if not work.empty:
+        top_row = work.sort_values(["Count", "Direction"], ascending=[False, True]).iloc[0]
+        top_direction = str(top_row["Direction"])
+        top_pct = float(top_row["Count"]) / total * 100.0
+    else:
+        top_direction = None
+        top_pct = 0.0
+
+    return {
+        "left_count": left,
+        "right_count": right,
+        "short_count": short,
+        "long_count": longv,
+        "diag_left_count": diag_left,
+        "diag_right_count": diag_right,
+        "left_pct": left / total * 100.0,
+        "right_pct": right / total * 100.0,
+        "short_pct": short / total * 100.0,
+        "long_pct": longv / total * 100.0,
+        "diag_left_pct": diag_left / total * 100.0,
+        "diag_right_pct": diag_right / total * 100.0,
+        "top_direction": top_direction,
+        "top_pct": top_pct,
+        "total": total_count,
+        "left_family": "Short Left + Left + Long Left",
+        "right_family": "Short Right + Right + Long Right",
+        "short_family": "Short Left + Short + Short Right",
+        "long_family": "Long Left + Long + Long Right",
+    }
+
+
+def build_miss_direction_compare(round_dir_df, bench_dir_df):
+    round_bias = _miss_bias_summary(round_dir_df)
+    bench_bias = _miss_bias_summary(bench_dir_df)
+
+    rows = []
+    metrics = [
+        ("Left Bias", "left_count", "left_pct", "Short Left + Left + Long Left"),
+        ("Right Bias", "right_count", "right_pct", "Short Right + Right + Long Right"),
+        ("Short Bias", "short_count", "short_pct", "Short Left + Short + Short Right"),
+        ("Long Bias", "long_count", "long_pct", "Long Left + Long + Long Right"),
+        ("Short/Long Left", "diag_left_count", "diag_left_pct", "Short Left + Long Left"),
+        ("Short/Long Right", "diag_right_count", "diag_right_pct", "Short Right + Long Right"),
+    ]
+    for label, count_key, pct_key, family in metrics:
+        r_count = int(round_bias.get(count_key, 0))
+        b_count = int(bench_bias.get(count_key, 0))
+        r_pct = float(round_bias.get(pct_key, 0.0))
+        b_pct = float(bench_bias.get(pct_key, 0.0))
+        rows.append({
+            "Metric": label,
+            "Includes": family,
+            "Round Count": r_count,
+            "Round %": round(r_pct, 1),
+            "Baseline Count": b_count,
+            "Baseline %": round(b_pct, 1),
+            "Delta": round(r_pct - b_pct, 1),
+            "Round Total Misses": int(round_bias.get("total", 0)),
+            "Baseline Total Misses": int(bench_bias.get("total", 0)),
+        })
+    return pd.DataFrame(rows), round_bias, bench_bias
+
+
+def build_grouped_miss_profile(round_bias, bench_bias, compare_label="Baseline"):
+    rows = [
+        {
+            "Family": "Left",
+            "Includes": round_bias.get("left_family", "Short Left + Left + Long Left"),
+            "Round Count": int(round_bias.get("left_count", 0)),
+            "Round %": float(round_bias.get("left_pct", 0.0)),
+            f"{compare_label} Count": int(bench_bias.get("left_count", 0)),
+            f"{compare_label} %": float(bench_bias.get("left_pct", 0.0)),
+        },
+        {
+            "Family": "Right",
+            "Includes": round_bias.get("right_family", "Short Right + Right + Long Right"),
+            "Round Count": int(round_bias.get("right_count", 0)),
+            "Round %": float(round_bias.get("right_pct", 0.0)),
+            f"{compare_label} Count": int(bench_bias.get("right_count", 0)),
+            f"{compare_label} %": float(bench_bias.get("right_pct", 0.0)),
+        },
+        {
+            "Family": "Short",
+            "Includes": round_bias.get("short_family", "Short Left + Short + Short Right"),
+            "Round Count": int(round_bias.get("short_count", 0)),
+            "Round %": float(round_bias.get("short_pct", 0.0)),
+            f"{compare_label} Count": int(bench_bias.get("short_count", 0)),
+            f"{compare_label} %": float(bench_bias.get("short_pct", 0.0)),
+        },
+        {
+            "Family": "Long",
+            "Includes": round_bias.get("long_family", "Long Left + Long + Long Right"),
+            "Round Count": int(round_bias.get("long_count", 0)),
+            "Round %": float(round_bias.get("long_pct", 0.0)),
+            f"{compare_label} Count": int(bench_bias.get("long_count", 0)),
+            f"{compare_label} %": float(bench_bias.get("long_pct", 0.0)),
+        },
+    ]
+    out = pd.DataFrame(rows)
+    out["Delta"] = (pd.to_numeric(out["Round %"], errors="coerce").fillna(0) - pd.to_numeric(out[f"{compare_label} %"], errors="coerce").fillna(0)).round(1)
+    out["Round Label"] = out.apply(lambda r: f"{int(r['Round Count'])}/{int(round_bias.get('total',0))} ({float(r['Round %']):.1f}%)" if int(round_bias.get('total',0)) else "0/0 (0.0%)", axis=1)
+    out[f"{compare_label} Label"] = out.apply(lambda r: f"{int(r[f'{compare_label} Count'])}/{int(bench_bias.get('total',0))} ({float(r[f'{compare_label} %']):.1f}%)" if int(bench_bias.get('total',0)) else "0/0 (0.0%)", axis=1)
+    return out
+
+
+def build_miss_direction_diagnosis(round_dir_df, bench_dir_df):
+    compare_df, round_bias, bench_bias = build_miss_direction_compare(round_dir_df, bench_dir_df)
+    insights = []
+
+    top_dir = round_bias.get("top_direction")
+    if top_dir:
+        insights.append(f"Most common approach miss this round: {top_dir} ({round_bias['top_pct']:.1f}% of misses, {int(round_bias.get('total', 0))} total misses).")
+
+    if not compare_df.empty:
+        strongest = compare_df.sort_values("Delta", ascending=False).iloc[0]
+        weakest = compare_df.sort_values("Delta", ascending=True).iloc[0]
+        if float(strongest["Delta"]) > 4.9:
+            insights.append(f"Compared to baseline, misses skewed more toward {strongest['Metric'].replace(' Bias','').lower()} ({int(strongest['Round Count'])}/{int(strongest['Round Total Misses'])}, {strongest['Delta']:+.1f} pts).")
+        if float(weakest["Delta"]) < -4.9:
+            insights.append(f"Compared to baseline, {weakest['Metric'].replace(' Bias','').lower()} misses were down ({int(weakest['Round Count'])}/{int(weakest['Round Total Misses'])}, {weakest['Delta']:+.1f} pts).")
+
+    lr_gap = round_bias["left_pct"] - round_bias["right_pct"]
+    sl_gap = round_bias["short_pct"] - round_bias["long_pct"]
+    if abs(lr_gap) >= 10:
+        insights.append("Directional control leaned left more than right." if lr_gap > 0 else "Directional control leaned right more than left.")
+    if abs(sl_gap) >= 10:
+        insights.append("Distance control leaned short more than long." if sl_gap > 0 else "Distance control leaned long more than short.")
+
+    return insights[:4], compare_df, round_bias, bench_bias
+
+
+def render_miss_direction_bias_cards(compare_df):
+    if compare_df is None or compare_df.empty:
+        st.info("No miss-bias comparison available.")
+        return
+
+    cards = st.columns(min(3, len(compare_df)))
+    show_rows = compare_df.sort_values("Delta", key=lambda s: s.abs(), ascending=False).head(3).reset_index(drop=True)
+    for i, (_, row) in enumerate(show_rows.iterrows()):
+        with cards[i]:
+            delta = float(row["Delta"])
+            arrow = "🔺" if delta > 0.05 else ("🔻" if delta < -0.05 else "➡️")
+            st.metric(
+                row["Metric"],
+                f"{int(row['Round Count'])}/{int(row['Round Total Misses'])} ({float(row['Round %']):.1f}%)",
+                f"{arrow} {delta:+.1f} pts vs baseline"
+            )
+
+
+def render_grouped_miss_profile(group_df, compare_label="Baseline"):
+    if group_df is None or group_df.empty:
+        st.info("No grouped miss profile available.")
+        return
+
+    family_order = ["Left", "Right", "Short", "Long"]
+
+    round_df = group_df[["Family", "Round Count", "Round %"]].rename(
+        columns={"Round Count": "Count", "Round %": "Pct"}
+    ).copy()
+    base_df = group_df[["Family", f"{compare_label} Count", f"{compare_label} %"]].rename(
+        columns={f"{compare_label} Count": "Count", f"{compare_label} %": "Pct"}
+    ).copy()
+
+    render_paired_compare_counts(
+        round_df,
+        base_df,
+        key_col="Family",
+        key_order=family_order,
+        compare_mode=compare_label,
+        title="Grouped Miss Families — Left/Right/Short/Long",
+        value_label="Miss Count",
+    )
+
+    st.dataframe(group_df, use_container_width=True, hide_index=True)
 
 
 def build_dispersion_points(frame):
@@ -2970,6 +3288,34 @@ with nav2:
 selected_round = round_label_map[st.session_state["selected_round_label"]]
 round_data = filtered_df[filtered_df["Round Link"] == selected_round].copy()
 
+baseline_pool_df = build_round_selector_df(df)
+baseline_pool_df = baseline_pool_df[baseline_pool_df["Round Link"] != selected_round].copy()
+baseline_label_to_round = dict(zip(baseline_pool_df["Round Label"], baseline_pool_df["Round Link"]))
+baseline_round_labels = baseline_pool_df["Round Label"].tolist()
+
+with st.expander("🆚 Custom Round Baseline", expanded=False):
+    st.caption("Pick one or more rounds to use as a custom comparison set. This can include rounds from other players too. Then choose 'Selected Rounds' in any comparison control below.")
+    baseline_search = st.text_input("Search comparison rounds", value="", key="baseline_search_text")
+    visible_baseline_labels = baseline_round_labels
+    if baseline_search.strip():
+        q = baseline_search.strip().lower()
+        visible_baseline_labels = [lbl for lbl in baseline_round_labels if q in lbl.lower()]
+
+    selected_baseline_labels = st.multiselect(
+        "Comparison rounds",
+        options=visible_baseline_labels,
+        default=st.session_state.get("selected_baseline_round_labels", []),
+        key="selected_baseline_round_labels",
+    )
+    selected_baseline_round_ids = [baseline_label_to_round[x] for x in selected_baseline_labels if x in baseline_label_to_round]
+    selected_baseline_df = df[df["Round Link"].isin(selected_baseline_round_ids)].copy() if selected_baseline_round_ids else df.iloc[0:0].copy()
+    if selected_baseline_labels:
+        st.markdown(f"**Selected:** {len(selected_baseline_labels)} round(s)")
+        render_baseline_summary_box(build_baseline_summary(selected_baseline_df, "Selected Rounds"))
+    else:
+        st.caption("No custom rounds selected yet.")
+        selected_baseline_df = df.iloc[0:0].copy()
+
 # =========================================================
 # Selected round prep
 # =========================================================
@@ -4224,6 +4570,207 @@ def build_overview_round_summary(metric_df):
 
     return {"good": good, "lock": lock}
 
+def build_round_diagnosis(metric_df):
+    if metric_df is None or metric_df.empty:
+        return pd.DataFrame(columns=["Metric", "Area", "Stroke Impact", "Round", "Baseline", "Delta"])
+
+    impact_map = {
+        "Putts / 18": ("Putting", 1.00),
+        "GIR %": ("Approach Play", 0.12),
+        "Fairway %": ("Tee Ball", 0.05),
+        "Scramble %": ("Short Game", 0.04),
+        "Up & Down %": ("Short Game", 0.03),
+        "Avg First-Putt Proximity": ("Approach Proximity", 0.03),
+        "Lost Balls / 18": ("Penalty Avoidance", 1.00),
+        "Arnies / 18": ("Recovery / Creativity", 0.40),
+        "Seves / 18": ("Recovery / Creativity", 0.50),
+    }
+
+    rows = []
+    for _, r in metric_df.iterrows():
+        metric = str(r.get("Metric", ""))
+        if metric not in impact_map:
+            continue
+        area, weight = impact_map[metric]
+        good_delta = float(pd.to_numeric(r.get("GoodDelta", 0), errors="coerce") or 0.0)
+        impact = good_delta * weight
+        rows.append({
+            "Metric": metric,
+            "Area": area,
+            "Stroke Impact": impact,
+            "Round": r.get("Round Display", "—"),
+            "Baseline": r.get("Baseline Display", "—"),
+            "Delta": r.get("DeltaDisplay", r.get("Delta Display", "—")),
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out.sort_values(["Stroke Impact", "Metric"], ascending=[False, True]).reset_index(drop=True)
+    return out
+
+
+def build_round_impact_summary(metric_df):
+    diag = build_round_diagnosis(metric_df)
+    if diag.empty:
+        return {"total": 0.0, "good": pd.DataFrame(), "bad": pd.DataFrame(), "areas": pd.DataFrame()}
+
+    area_df = diag.groupby("Area", as_index=False)["Stroke Impact"].sum().sort_values("Stroke Impact", ascending=False)
+    return {
+        "total": float(diag["Stroke Impact"].sum()),
+        "good": diag[diag["Stroke Impact"] > 0.05].head(3).copy(),
+        "bad": diag[diag["Stroke Impact"] < -0.05].sort_values("Stroke Impact", ascending=True).head(3).copy(),
+        "areas": area_df,
+    }
+
+
+def render_round_impact_cards(metric_df, compare_label):
+    import streamlit.components.v1 as components
+
+    summary = build_round_impact_summary(metric_df)
+    good = summary["good"]
+    bad = summary["bad"]
+    total = summary["total"]
+
+    def _rows(block, positive=True):
+        if block is None or block.empty:
+            return "<div class='rid-row'><div class='rid-m'>No major drivers stood out.</div><div class='rid-v'>—</div></div>"
+        html = ""
+        for _, r in block.iterrows():
+            sign = "+" if float(r["Stroke Impact"]) > 0 else ""
+            html += f"<div class='rid-row'><div class='rid-m'>{r['Area']}<div class='rid-sub'>{r['Metric']}</div></div><div class='rid-v'>{sign}{float(r['Stroke Impact']):.2f}</div></div>"
+        return html
+
+    total_cls = "rid-good" if total > 0.05 else ("rid-bad" if total < -0.05 else "rid-flat")
+    total_label = f"{total:+.2f} est." if abs(total) > 0.01 else "Even"
+
+    html = f"""
+    <style>
+      .rid-grid {{display:grid; grid-template-columns: 1.1fr 1fr 1fr; gap:12px; margin:6px 0 12px 0; font-family:Segoe UI, Roboto, Arial, sans-serif;}}
+      .rid-card {{background:linear-gradient(180deg,#2a2a2a 0%, #202020 100%); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:12px 14px; box-shadow:0 8px 18px rgba(0,0,0,.16);}}
+      .rid-h {{font-size:13px; font-weight:800; color:#fff; margin-bottom:8px;}}
+      .rid-big {{font-size:28px; font-weight:900; color:#fff; margin-bottom:4px;}}
+      .rid-subtxt {{font-size:12px; color:#bdbdbd; line-height:1.45;}}
+      .rid-row {{display:flex; justify-content:space-between; gap:10px; align-items:flex-start; padding:6px 0; border-top:1px solid rgba(255,255,255,.06);}}
+      .rid-row:first-child {{border-top:none; padding-top:2px;}}
+      .rid-m {{color:#fff; font-size:12px; font-weight:800;}}
+      .rid-sub {{color:#bdbdbd; font-size:11px; font-weight:600; margin-top:2px;}}
+      .rid-v {{color:#fff; font-size:12px; font-weight:900; white-space:nowrap; font-variant-numeric:tabular-nums;}}
+      .rid-good {{color:#64dfb5;}}
+      .rid-bad {{color:#ee6c4d;}}
+      .rid-flat {{color:#bdbdbd;}}
+    </style>
+    <div class="rid-grid">
+      <div class="rid-card">
+        <div class="rid-h">🧮 Estimated Round Impact vs {compare_label}</div>
+        <div class="rid-big {total_cls}">{total_label}</div>
+        <div class="rid-subtxt">Positive values suggest you saved strokes versus the selected baseline. Negative values suggest where strokes leaked out.</div>
+      </div>
+      <div class="rid-card">
+        <div class="rid-h">🔺 Biggest Gains</div>
+        {_rows(good, True)}
+      </div>
+      <div class="rid-card">
+        <div class="rid-h">🔻 Biggest Leaks</div>
+        {_rows(bad, False)}
+      </div>
+    </div>
+    """
+    components.html(html, height=220, scrolling=False)
+
+
+def build_why_round_happened(round_data, metric_df, compare_label):
+    summary = build_round_impact_summary(metric_df)
+    good = []
+    watch = []
+
+    if not summary["good"].empty:
+        top = summary["good"].iloc[0]
+        good.append(f"Strongest edge vs {compare_label}: {top['Area']} ({float(top['Stroke Impact']):+.2f} est.).")
+    if len(summary["good"]) > 1:
+        top2 = summary["good"].iloc[1]
+        good.append(f"Secondary lift: {top2['Area']} ({float(top2['Stroke Impact']):+.2f} est.).")
+
+    if not summary["bad"].empty:
+        leak = summary["bad"].iloc[0]
+        watch.append(f"Largest leak vs {compare_label}: {leak['Area']} ({float(leak['Stroke Impact']):+.2f} est.).")
+    if len(summary["bad"]) > 1:
+        leak2 = summary["bad"].iloc[1]
+        watch.append(f"Next biggest issue: {leak2['Area']} ({float(leak2['Stroke Impact']):+.2f} est.).")
+
+    score_to_par = pd.to_numeric(_safe_col(round_data, "Score to Par", pd.NA), errors="coerce")
+    if score_to_par.isna().all():
+        score_to_par = pd.to_numeric(_safe_col(round_data, "Hole Score", 0), errors="coerce") - pd.to_numeric(_safe_col(round_data, "Par", 0), errors="coerce")
+    doubles = int((score_to_par >= 2).sum())
+    if doubles:
+        watch.append(f"Blow-up holes mattered: {doubles} hole(s) at double bogey or worse.")
+
+    three_putt_bogeys = int(pd.to_numeric(_safe_col(round_data, "3 Putt Bogey", 0), errors="coerce").fillna(0).sum())
+    if three_putt_bogeys:
+        watch.append(f"Three-putt bogeys cost momentum: {three_putt_bogeys} this round.")
+
+    lost_balls = int(pd.to_numeric(_safe_col(round_data, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0).sum() + pd.to_numeric(_safe_col(round_data, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0).sum())
+    if lost_balls:
+        watch.append(f"Penalty pressure showed up: {lost_balls} lost ball(s).")
+
+    if not good:
+        good.append(f"No single category clearly outperformed the {compare_label.lower()} sample.")
+    if not watch:
+        watch.append(f"No single category clearly underperformed the {compare_label.lower()} sample.")
+
+    return {"good": good[:3], "watch": watch[:4]}
+
+
+def build_trend_vs_baseline_df(trend_source, baseline_df):
+    round_col = _resolve_round_col(trend_source)
+    if round_col is None or round_col not in trend_source.columns or trend_source.empty or baseline_df is None or baseline_df.empty:
+        return pd.DataFrame(columns=["Round","Date","ScoreDelta","GIRDelta","FWDelta","PuttsDelta","OverallEdge"])
+
+    base_overview = build_overview_snapshot(baseline_df)
+    rows = []
+    for rid, block in trend_source.groupby(round_col, dropna=True):
+        metric_df = build_overview_metric_rows(build_overview_snapshot(block), base_overview, "Baseline")
+        impact_summary = build_round_impact_summary(metric_df)
+        def _gd(metric):
+            sub = metric_df[metric_df["Metric"] == metric]
+            return float(pd.to_numeric(sub["GoodDelta"].iloc[0], errors="coerce")) if not sub.empty else 0.0
+        rows.append({
+            "Round": rid,
+            "Date": pd.to_datetime(_safe_col(block, "Date Played", pd.NaT), errors="coerce").max(),
+            "ScoreDelta": _gd("Avg Score / 18"),
+            "GIRDelta": _gd("GIR %"),
+            "FWDelta": _gd("Fairway %"),
+            "PuttsDelta": _gd("Putts / 18"),
+            "OverallEdge": float(impact_summary["total"]),
+        })
+    out = pd.DataFrame(rows).sort_values(["Date", "Round"]).reset_index(drop=True)
+    if out.empty:
+        return out
+    out["RoundNumber"] = range(1, len(out) + 1)
+    for c in ["ScoreDelta", "GIRDelta", "FWDelta", "PuttsDelta", "OverallEdge"]:
+        out[f"{c}_Roll5"] = pd.to_numeric(out[c], errors="coerce").rolling(5, min_periods=1).mean()
+    return out
+
+
+def render_trend_vs_baseline_chart(trend_df, value_col, roll_col, title, y_title):
+    if trend_df is None or trend_df.empty or value_col not in trend_df.columns:
+        st.info(f"No data available for {title.lower()}.")
+        return
+    plot_df = trend_df.copy()
+    plot_df["DateLabel"] = pd.to_datetime(plot_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    base_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeDash=[6,4], color="#f2c14e", opacity=0.8).encode(y="y:Q")
+    actual = alt.Chart(plot_df).mark_line(point=True, strokeWidth=2.8).encode(
+        x=alt.X("RoundNumber:Q", title="Round"),
+        y=alt.Y(f"{value_col}:Q", title=y_title),
+        tooltip=[alt.Tooltip("RoundNumber:Q", title="Round #"), alt.Tooltip("DateLabel:N", title="Date"), alt.Tooltip(f"{value_col}:Q", title=y_title, format=".2f"), alt.Tooltip(f"{roll_col}:Q", title="Rolling 5", format=".2f")],
+        color=alt.value("#4f8cff")
+    )
+    roll = alt.Chart(plot_df).mark_line(strokeWidth=3.2, opacity=0.95).encode(
+        x=alt.X("RoundNumber:Q"), y=alt.Y(f"{roll_col}:Q"), color=alt.value("#64dfb5")
+    )
+    st.altair_chart((base_rule + actual + roll).properties(height=280, title=title).configure_view(strokeOpacity=0), use_container_width=True)
+
+
 # =========================================================
 # Tabs
 # =========================================================
@@ -4232,14 +4779,44 @@ tab_scorecard, tab_overview, tab_analysis, tab_putting, tab_trends, tab_bestof, 
 with tab_overview:
     st.markdown("### 📋 High-Level Overview")
     st.caption("Quick top-line round review with a cleaner comparison view.")
-    compare_mode_overview = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="overview_compare_mode")
-    benchmark_df = build_benchmark_df(df, round_data, compare_mode_overview)
+    compare_mode_overview = st.radio("Compare this round against:", _compare_mode_options(), horizontal=True, key="overview_compare_mode")
+    compare_label_overview = _compare_mode_display_label(compare_mode_overview)
+    benchmark_df = build_benchmark_df(df, round_data, compare_mode_overview, selected_baseline_round_ids)
+    if compare_mode_overview == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to compare this round against a custom sample.")
 
     round_overview = build_overview_snapshot(round_data)
     base_overview = build_overview_snapshot(benchmark_df)
-    metric_df = build_overview_metric_rows(round_overview, base_overview, compare_mode_overview)
+    metric_df = build_overview_metric_rows(round_overview, base_overview, compare_label_overview)
 
-    render_overview_cards(metric_df, compare_mode_overview)
+    render_baseline_summary_box(build_baseline_summary(benchmark_df, compare_mode_overview))
+    render_overview_cards(metric_df, compare_label_overview)
+    render_round_impact_cards(metric_df, compare_label_overview)
+
+    why_summary = build_why_round_happened(round_data, metric_df, compare_label_overview)
+    why_left, why_right = st.columns(2)
+    with why_left:
+        why_good_html = "<br>".join([f"• {x}" for x in why_summary["good"]])
+        st.markdown(
+            f"""
+            <div style="background:#1f2c25; border:1px solid rgba(100,223,181,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+              <b>🧠 Why this round worked</b><br>
+              {why_good_html}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with why_right:
+        why_watch_html = "<br>".join([f"• {x}" for x in why_summary["watch"]])
+        st.markdown(
+            f"""
+            <div style="background:#2d2323; border:1px solid rgba(238,108,77,.18); border-radius:12px; padding:12px 14px; line-height:1.6;">
+              <b>🔍 Why the score landed where it did</b><br>
+              {why_watch_html}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     top_left, top_right = st.columns([1.25, 1.0])
 
@@ -4247,14 +4824,14 @@ with tab_overview:
         st.markdown("#### Comparison Table")
         overview_table = metric_df[["Metric", "Round Display", "Baseline Display", "Delta Display", "Better"]].rename(columns={
             "Round Display": "Round",
-            "Baseline Display": compare_mode_overview,
+            "Baseline Display": compare_label_overview,
             "Delta Display": "Change",
         }).copy()
         st.dataframe(overview_table, use_container_width=True, hide_index=True)
 
     with top_right:
         st.markdown("#### Improvement Snapshot")
-        render_overview_delta_chart(metric_df, compare_mode_overview)
+        render_overview_delta_chart(metric_df, compare_label_overview)
 
     quick1, quick2, quick3, quick4 = st.columns(4)
     with quick1:
@@ -4310,10 +4887,10 @@ with tab_overview:
     mix_left, mix_right = st.columns(2)
     with mix_left:
         st.markdown("##### Score Type Mix")
-        render_segmented_score_mix_compare(round_mix["score_df"], base_mix["score_df"], compare_mode_overview)
+        render_segmented_score_mix_compare(round_mix["score_df"], base_mix["score_df"], compare_label_overview)
     with mix_right:
         st.markdown("##### Score Category Mix")
-        render_segmented_category_mix_compare(round_mix["cat_df"], base_mix["cat_df"], compare_mode_overview)
+        render_segmented_category_mix_compare(round_mix["cat_df"], base_mix["cat_df"], compare_label_overview)
 
     ov_summary = build_overview_round_summary(metric_df)
 
@@ -4871,8 +5448,10 @@ with tab_scorecard:
 with tab_analysis:
     st.markdown("### 🎯 Approach Breakdown")
     st.info("For deeper filters, shot-pattern exploration, GIR-only splits, Best Clubs, and Best Yardage Windows, jump over to the Analysis tab.")
-    compare_mode = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="approach_compare_mode")
-    benchmark_df = build_benchmark_df(df, round_data, compare_mode)
+    compare_mode = st.radio("Compare this round against:", _compare_mode_options(), horizontal=True, key="approach_compare_mode")
+    benchmark_df = build_benchmark_df(df, round_data, compare_mode, selected_baseline_round_ids)
+    if compare_mode == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
 
     round_approach = prepare_approach_frame(round_data)
     bench_approach = prepare_approach_frame(benchmark_df)
@@ -5070,6 +5649,20 @@ with tab_analysis:
             how="outer"
         ).sort_values("Direction")
         st.dataframe(dir_table, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Miss Bias vs Baseline")
+        miss_insights, miss_compare_df, miss_round_bias, miss_bench_bias = build_miss_direction_diagnosis(round_dir, bench_dir)
+        render_miss_direction_bias_cards(miss_compare_df)
+        st.dataframe(miss_compare_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Grouped Miss Families")
+        grouped_miss_df = build_grouped_miss_profile(miss_round_bias, miss_bench_bias, compare_mode)
+        render_grouped_miss_profile(grouped_miss_df, compare_mode)
+
+        st.markdown("#### Miss Diagnosis")
+        for line in miss_insights:
+            st.markdown(f"- {line}")
+        st.caption("Left = Short Left + Left + Long Left. Right = Short Right + Right + Long Right. Short = Short Left + Short + Short Right. Long = Long Left + Long + Long Right.")
     else:
         st.info("No approach miss direction data found.")
 
@@ -5326,8 +5919,10 @@ with tab_analysis:
 
 with tab_putting:
     st.markdown("### 🏌️ Putting Breakdown")
-    compare_mode_putt = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="putting_compare_mode")
-    benchmark_df_putt = build_benchmark_df(df, round_data, compare_mode_putt)
+    compare_mode_putt = st.radio("Compare this round against:", _compare_mode_options(), horizontal=True, key="putting_compare_mode")
+    benchmark_df_putt = build_benchmark_df(df, round_data, compare_mode_putt, selected_baseline_round_ids)
+    if compare_mode_putt == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
 
     putt_overlay_mode = st.radio(
         "Putting chart overlay:",
@@ -5625,6 +6220,27 @@ with tab_trends:
         trends_source = trends_source[trends_source["Course Name"].astype(str).isin(trend_courses)].copy()
 
     trend_df = build_trends_round_frame(trends_source)
+
+    st.markdown("#### Trend vs Baseline Over Time")
+    trend_compare_mode = st.radio("Trend baseline:", _compare_mode_options(), horizontal=True, key="trend_compare_mode")
+    trend_compare_label = _compare_mode_display_label(trend_compare_mode)
+    trend_baseline_df = build_benchmark_df(df, round_data, trend_compare_mode, selected_baseline_round_ids)
+    if trend_compare_mode == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds trend baseline.")
+    else:
+        render_baseline_summary_box(build_baseline_summary(trend_baseline_df, trend_compare_mode))
+        trend_vs_base_df = build_trend_vs_baseline_df(trends_source, trend_baseline_df)
+        if not trend_vs_base_df.empty:
+            tvb1, tvb2 = st.columns(2)
+            with tvb1:
+                render_trend_vs_baseline_chart(trend_vs_base_df, "OverallEdge", "OverallEdge_Roll5", f"Estimated Edge vs {trend_compare_label}", "Estimated strokes vs baseline")
+            with tvb2:
+                render_trend_vs_baseline_chart(trend_vs_base_df, "ScoreDelta", "ScoreDelta_Roll5", f"Score / 18 Delta vs {trend_compare_label}", "Positive = better")
+            tvb3, tvb4 = st.columns(2)
+            with tvb3:
+                render_trend_vs_baseline_chart(trend_vs_base_df, "GIRDelta", "GIRDelta_Roll5", f"GIR Delta vs {trend_compare_label}", "Pts better than baseline")
+            with tvb4:
+                render_trend_vs_baseline_chart(trend_vs_base_df, "PuttsDelta", "PuttsDelta_Roll5", f"Putts / 18 Delta vs {trend_compare_label}", "Positive = better")
 
     if trend_df.empty:
         st.info("No round-based trend data available yet.")
@@ -6038,8 +6654,10 @@ with tab_shortgame:
 
 
     st.markdown("### ⛳ Short Game / Chipping Breakdown")
-    compare_mode_sg = st.radio("Compare this round against:", ["All Time", "Same Year", "Same Month", "Same Course"], horizontal=True, key="shortgame_compare_mode")
-    benchmark_df_sg = build_benchmark_df(df, round_data, compare_mode_sg)
+    compare_mode_sg = st.radio("Compare this round against:", _compare_mode_options(), horizontal=True, key="shortgame_compare_mode")
+    benchmark_df_sg = build_benchmark_df(df, round_data, compare_mode_sg, selected_baseline_round_ids)
+    if compare_mode_sg == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
 
     round_sg = prepare_short_game_frame(round_data)
     bench_sg = prepare_short_game_frame(benchmark_df_sg)
