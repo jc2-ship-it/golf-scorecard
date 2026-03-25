@@ -109,6 +109,34 @@ def load_fun_facts():
         "The term 'birdie' originated at Atlantic City Country Club in 1903."
     ]
 
+
+def render_trivia_block(page_key, heading="Fun trivia corner"):
+    facts = load_fun_facts()
+    if not facts:
+        return
+
+    state_key = f"trivia_idx_{page_key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = random.randrange(len(facts))
+
+    c1, c2 = st.columns([6, 1])
+    with c1:
+        st.markdown(f"#### {heading}")
+    with c2:
+        if st.button("New fact", key=f"btn_{page_key}"):
+            st.session_state[state_key] = random.randrange(len(facts))
+
+    fact = facts[st.session_state[state_key]]
+    st.markdown(
+        f"""
+        <div style="background: linear-gradient(180deg, rgba(49,46,129,.28) 0%, rgba(17,24,39,.78) 100%); border: 1px solid rgba(255,255,255,.10); border-radius: 16px; padding: 14px 16px; margin-top: 8px; margin-bottom: 10px;">
+          <div style="font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; opacity: .72; margin-bottom: 8px;">Golf Trivia</div>
+          <div style="font-size: 1rem; line-height: 1.45; font-weight: 500;">{fact}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def segment_total(vals, start, end):
     return sum(vals[start:end])
 
@@ -3402,6 +3430,12 @@ total_1_putts = int((round_data["Putts"] == 1).sum())
 total_3_plus_putts = int((round_data["Putts"] >= 3).sum())
 total_3_putt_bogeys = int(_num(_safe_col(round_data, "3 Putt Bogey", 0)).sum())
 
+putts_made_ft_numeric = _num(_safe_col(round_data, "Feet of Putt Made (How far was the putt you made)", 0)).fillna(0)
+longest_putt_made = float(putts_made_ft_numeric.max()) if not putts_made_ft_numeric.empty else 0.0
+putts_made_5_or_less = int(((putts_made_ft_numeric > 0) & (putts_made_ft_numeric <= 5)).sum())
+putts_made_5_to_10 = int(((putts_made_ft_numeric > 5) & (putts_made_ft_numeric <= 10)).sum())
+putts_made_over_10 = int((putts_made_ft_numeric > 10).sum())
+
 pro_par_total = int(_num(_safe_col(round_data, "Pro Par", 0)).sum())
 pro_birdie_total = int(_num(_safe_col(round_data, "Pro Birdie", 0)).sum())
 pro_eagle_total = int(_num(_safe_col(round_data, "Pro Eagle+", 0)).sum())
@@ -3879,6 +3913,10 @@ def render_scorecard_summary_panel(
     total_1_putts,
     total_3_plus_putts,
     total_3_putt_bogeys,
+    longest_putt_made,
+    putts_made_5_or_less,
+    putts_made_5_to_10,
+    putts_made_over_10,
     pro_pars_total,
     arnies_total,
     seves_total,
@@ -3984,13 +4022,14 @@ def render_scorecard_summary_panel(
         </div>
 
         <div class="scsum-card">
-          <div class="scsum-h">📈 Scoring Profile</div>
-          <div class="scsum-row"><div class="scsum-l">Par 3 Avg</div><div class="scsum-r">{avg_par3:.1f}</div></div>
-          <div class="scsum-row"><div class="scsum-l">Par 4 Avg</div><div class="scsum-r">{avg_par4:.1f}</div></div>
-          <div class="scsum-row"><div class="scsum-l">Par 5 Avg</div><div class="scsum-r">{avg_par5:.1f}</div></div>
+          <div class="scsum-h">💡 Advanced Insights</div>
           <div class="scsum-row"><div class="scsum-l">1-Putts</div><div class="scsum-r">{total_1_putts}</div></div>
           <div class="scsum-row"><div class="scsum-l">3+ Putts</div><div class="scsum-r">{total_3_plus_putts}</div></div>
           <div class="scsum-row"><div class="scsum-l">3-Putt Bogeys</div><div class="scsum-r">{total_3_putt_bogeys}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Longest Putt Made</div><div class="scsum-r">{longest_putt_made:.1f} ft</div></div>
+          <div class="scsum-row"><div class="scsum-l">Putts Made ≤ 5 ft</div><div class="scsum-r">{putts_made_5_or_less}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Putts Made 5–10 ft</div><div class="scsum-r">{putts_made_5_to_10}</div></div>
+          <div class="scsum-row"><div class="scsum-l">Putts Made > 10 ft</div><div class="scsum-r">{putts_made_over_10}</div></div>
           <div class="scsum-row"><div class="scsum-l">Pro Pars+</div><div class="scsum-r">{pro_pars_total}</div></div>
         </div>
 
@@ -4919,6 +4958,8 @@ with tab_overview:
             unsafe_allow_html=True
         )
 
+    render_trivia_block("overview", "Overview trivia")
+
 with tab_scorecard:
     table_html = f"""
     <style>
@@ -5074,6 +5115,26 @@ with tab_scorecard:
 
     summary_details_html = f"""
     <br>
+    <b>💡 Advanced Insights</b><br>
+    Total 1 Putts: {total_1_putts}<br>
+    Total 3+ Putts: {total_3_plus_putts}<br>
+    3-Putt Bogeys: {total_3_putt_bogeys}<br>
+    Longest Putt Made: {longest_putt_made:.1f} ft<br>
+    Putts Made ≤ 5 ft: {putts_made_5_or_less}<br>
+    Putts Made 5–10 ft: {putts_made_5_to_10}<br>
+    Putts Made > 10 ft: {putts_made_over_10}<br>
+    Pro Pars+: {pro_pars_total}<br>
+    Arnies: {arnies_total}<br>
+    Scrambles: {scrambles_display}<br>
+    Up & Downs: {updowns_display}<br>
+    GIR — Par 3: {gir3_m}/{gir3_t} {gir3_pct:.1f}% {get_emoji(gir3_pct)} |
+    Par 4: {gir4_m}/{gir4_t} {gir4_pct:.1f}% {get_emoji(gir4_pct)} |
+    Par 5: {gir5_m}/{gir5_t} {gir5_pct:.1f}% {get_emoji(gir5_pct)}<br>
+    Fairways — Par 4: {fw4_m}/{fw4_t} {fw4_pct:.1f}% {get_emoji(fw4_pct)} |
+    Par 5: {fw5_m}/{fw5_t} {fw5_pct:.1f}% {get_emoji(fw5_pct)}<br>
+    GIR Overall: {gir_pct_num:.1f}% {get_emoji(gir_pct_num)}<br>
+    Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}<br><br>
+
     <b>📈 Scoring Averages</b><br>
     Par 3 Avg: {avg_par3:.1f}<br>
     Par 4 Avg: {avg_par4:.1f}<br>
@@ -5087,23 +5148,7 @@ with tab_scorecard:
     Triple Bogey +: {score_type_counts.get("Triple Bogey +", 0)}<br>
     Par or Better: {cat_counts.get("Par or Better", 0)} ({round(cat_counts.get("Par or Better", 0)/max(len(round_data),1)*100,1)}%) |
     Bogey: {cat_counts.get("Bogey", 0)} ({round(cat_counts.get("Bogey", 0)/max(len(round_data),1)*100,1)}%) |
-    Double+: {cat_counts.get("Double+", 0)} ({round(cat_counts.get("Double+", 0)/max(len(round_data),1)*100,1)}%)<br><br>
-
-    <b>💡 Advanced Insights</b><br>
-    Total 1 Putts: {total_1_putts}<br>
-    Total 3+ Putts: {total_3_plus_putts}<br>
-    3-Putt Bogeys: {total_3_putt_bogeys}<br>
-    Pro Pars+: {pro_pars_total}<br>
-    Arnies: {arnies_total}<br>
-    Scrambles: {scrambles_display}<br>
-    Up & Downs: {updowns_display}<br>
-    GIR — Par 3: {gir3_m}/{gir3_t} {gir3_pct:.1f}% {get_emoji(gir3_pct)} |
-    Par 4: {gir4_m}/{gir4_t} {gir4_pct:.1f}% {get_emoji(gir4_pct)} |
-    Par 5: {gir5_m}/{gir5_t} {gir5_pct:.1f}% {get_emoji(gir5_pct)}<br>
-    Fairways — Par 4: {fw4_m}/{fw4_t} {fw4_pct:.1f}% {get_emoji(fw4_pct)} |
-    Par 5: {fw5_m}/{fw5_t} {fw5_pct:.1f}% {get_emoji(fw5_pct)}<br>
-    GIR Overall: {gir_pct_num:.1f}% {get_emoji(gir_pct_num)}<br>
-    Seves: {seves_total} | Hole Outs: {hole_outs_total} | Lost Balls: {lost_balls_display}
+    Double+: {cat_counts.get("Double+", 0)} ({round(cat_counts.get("Double+", 0)/max(len(round_data),1)*100,1)}%)<br>
     """
 
     render_scorecard_summary_panel(
@@ -5130,6 +5175,10 @@ with tab_scorecard:
         total_1_putts=total_1_putts,
         total_3_plus_putts=total_3_plus_putts,
         total_3_putt_bogeys=total_3_putt_bogeys,
+        longest_putt_made=longest_putt_made,
+        putts_made_5_or_less=putts_made_5_or_less,
+        putts_made_5_to_10=putts_made_5_to_10,
+        putts_made_over_10=putts_made_over_10,
         pro_pars_total=pro_pars_total,
         arnies_total=arnies_total,
         seves_total=seves_total,
@@ -5151,8 +5200,6 @@ with tab_scorecard:
         fw5_t=fw5_t,
         fw5_pct=fw5_pct
     )
-
-    st.markdown(benchmarks_html, unsafe_allow_html=True)
 
     perf_grade, perf_score, perf_details = build_round_performance_rating(round_data, build_benchmark_df(df, round_data, "All Time"))
     detail_lines = []
@@ -5380,6 +5427,8 @@ with tab_scorecard:
     st.caption(counts_line)
     st.markdown(summary_details_html, unsafe_allow_html=True)
 
+    st.markdown(benchmarks_html, unsafe_allow_html=True)
+
     st.markdown("#### Hole-by-Hole (Score vs Par)")
     df_line = pd.DataFrame({
         "Hole": round_data["Hole"].astype(int),
@@ -5416,8 +5465,7 @@ with tab_scorecard:
         )
         st.write(f"**Current totals** — Score: {int(audit['ScoreN'].sum())} | Par: {int(audit['ParN'].sum())} | Δ (Score−Par): {int(audit['Delta'].sum()):+d}")
 
-    random_fact = random.choice(load_fun_facts())
-    st.markdown(f"<br><b>💡 Fun Fact:</b> {random_fact}", unsafe_allow_html=True)
+    render_trivia_block("scorecard", "Scorecard trivia")
 
     download_html = f"""
     <!doctype html>
@@ -5569,8 +5617,6 @@ with tab_analysis:
         else:
             st.info("No distance improvement tracker data available.")
 
-    st.markdown("#### Approach Dispersion Plot")
-    render_dispersion_panel(round_data, title="Round Approach Dispersion")
 
     st.markdown("#### Distance × Club Matrix")
     render_distance_club_compare_matrix(round_data, benchmark_df, compare_label=compare_mode, min_attempts=1)
@@ -5895,8 +5941,6 @@ with tab_analysis:
             else:
                 st.info("No shot pattern comparison bars available.")
 
-            st.markdown("##### Shot Pattern Dispersion")
-            render_dispersion_panel(round_shot_view, title="Filtered Shot Pattern Dispersion")
 
             st.dataframe(
                 round_shot_view.sort_values(["Date Played", "Hole"], ascending=[False, True])[[
@@ -5916,6 +5960,8 @@ with tab_analysis:
             st.info("No shot pattern rows match the current filters.")
     else:
         st.info("No shot pattern data available for this player.")
+
+    render_trivia_block("analysis", "Analysis tab trivia")
 
 with tab_putting:
     st.markdown("### 🏌️ Putting Breakdown")
@@ -6182,6 +6228,8 @@ with tab_putting:
         overlay_three_df = summarize_three_putt_by_bucket(overlay_frame)
         render_putting_overlay_line_chart(three_putt_bucket_df, overlay_three_df, PUTT_BUCKET_ORDER, title="3-Putt % Overlay", value_col="Pct", primary_name="This Round", overlay_name=overlay_label)
 
+    render_trivia_block("putting", "Putting tab trivia")
+
 
 with tab_trends:
     st.markdown("### 📈 Player Trends")
@@ -6317,6 +6365,8 @@ with tab_trends:
             "UpDownPct": "Up & Down %",
         })
         st.dataframe(trend_table, use_container_width=True, hide_index=True)
+
+    render_trivia_block("trends", "Trends tab trivia")
 
 
 
@@ -6650,6 +6700,8 @@ with tab_bestof:
                     st.info("No rows for this metric.")
 
 
+    render_trivia_block("bestof", "Best Of tab trivia")
+
 with tab_shortgame:
 
 
@@ -6780,3 +6832,5 @@ with tab_shortgame:
             "SG OnePutt": "1-Putt Save"
         })
     render_debug_section("🔎 Debug: Short game rows used in calculations", short_game_debug)
+
+    render_trivia_block("shortgame", "Short game tab trivia")
