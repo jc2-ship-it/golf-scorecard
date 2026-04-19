@@ -184,7 +184,7 @@ def build_table(frame: pd.DataFrame) -> pd.DataFrame:
         ("6–10 ft",  (tmp["ProxN"] > 6) & (tmp["ProxN"] <= 10)),
         ("10–16 ft", (tmp["ProxN"] > 10) & (tmp["ProxN"] <= 16)),
         ("16–22 ft", (tmp["ProxN"] > 16) & (tmp["ProxN"] <= 22)),
-        ("23–30 ft", (tmp["ProxN"] > 22) & (tmp["ProxN"] <= 30)),  # <-- FIXED (was >=23)
+        ("23–30 ft", (tmp["ProxN"] > 22) & (tmp["ProxN"] <= 30)),
         ("30–40 ft", (tmp["ProxN"] > 30) & (tmp["ProxN"] <= 40)),
         ("> 40 ft",  (tmp["ProxN"] > 40)),
     ]
@@ -301,7 +301,7 @@ st.caption(
 table = build_table(f)
 
 # ---------------------------
-# Table styling (no matplotlib)
+# Table styling (pandas 3-safe)
 # ---------------------------
 percent_cols = ["1-putt %", "2-putt %", "3+ putt %", "3-putt bogey %", "Birdie+ %", "Par %"]
 
@@ -348,23 +348,31 @@ def _style_table(df_show: pd.DataFrame):
         .apply(total_row_style, axis=1)
         .set_properties(**{"text-align": "right", "padding": "6px 10px"})
         .set_properties(subset=["Bucket"], **{"text-align": "left", "font-weight": "900"})
-        .applymap(pct_badge, subset=percent_cols)
-        .applymap(feet_badge, subset=["Feet Made / Hole"])
-        .format({
-            "Holes": "{:,.0f}",
-            "Putts (Total)": "{:,.0f}",
-            "1-putts": "{:,.0f}",
-            "2-putts": "{:,.0f}",
-            "3+ putts": "{:,.0f}",
-            "3-putt bogeys": "{:,.0f}",
-            "Birdie+ Attempts": "{:,.0f}",
-            "Birdie+ Makes": "{:,.0f}",
-            "Par Attempts": "{:,.0f}",
-            "Par Makes": "{:,.0f}",
-            "Feet Made (Total)": "{:,.1f}",
-            "Feet Made / Hole": "{:,.2f}",
-        })
     )
+
+    # pandas 3.0 removed Styler.applymap; Styler.map is the replacement
+    if hasattr(sty, "map"):
+        sty = sty.map(pct_badge, subset=percent_cols)
+        sty = sty.map(feet_badge, subset=["Feet Made / Hole"])
+    else:
+        sty = sty.applymap(pct_badge, subset=percent_cols)
+        sty = sty.applymap(feet_badge, subset=["Feet Made / Hole"])
+
+    sty = sty.format({
+        "Holes": "{:,.0f}",
+        "Putts (Total)": "{:,.0f}",
+        "1-putts": "{:,.0f}",
+        "2-putts": "{:,.0f}",
+        "3+ putts": "{:,.0f}",
+        "3-putt bogeys": "{:,.0f}",
+        "Birdie+ Attempts": "{:,.0f}",
+        "Birdie+ Makes": "{:,.0f}",
+        "Par Attempts": "{:,.0f}",
+        "Par Makes": "{:,.0f}",
+        "Feet Made (Total)": "{:,.1f}",
+        "Feet Made / Hole": "{:,.2f}",
+    })
+
     return sty
 
 st.dataframe(_style_table(table_display), use_container_width=True, hide_index=True)
@@ -438,11 +446,11 @@ base = alt.Chart(chart_plot).encode(
 )
 
 if metric in ["3+ putt %", "3-putt bogey %"]:
-    bar_color = "#EF4444"   # red
-    line_color = "#F97316"  # orange
+    bar_color = "#EF4444"
+    line_color = "#F97316"
 else:
-    bar_color = "#3B82F6"   # blue
-    line_color = "#22C55E"  # green
+    bar_color = "#3B82F6"
+    line_color = "#22C55E"
 
 bars = base.mark_bar(
     cornerRadiusTopLeft=7,
