@@ -620,6 +620,41 @@ def _per18(total, holes):
     return float(total) / holes * 18.0
 
 
+def _standardized_score_per18(frame):
+    """Projected 18-hole score on a standard par-72 mix.
+
+    Uses: Par 3 avg * 4 + Par 4 avg * 10 + Par 5 avg * 4.
+    If a sample is missing a par type, it fills that par type with the
+    player's/course sample average score-to-par added to that par value.
+    That keeps 9-hole rounds and par-3-heavy samples from skewing Avg Score / 18.
+    """
+    if frame is None or frame.empty:
+        return 0.0
+
+    d = frame.copy()
+    score = pd.to_numeric(_safe_col(d, "Hole Score", pd.NA), errors="coerce")
+    par = pd.to_numeric(_safe_col(d, "Par", pd.NA), errors="coerce")
+    valid = score.notna() & par.notna() & par.isin([3, 4, 5])
+    if not valid.any():
+        return 0.0
+
+    score = score[valid]
+    par = par[valid]
+    avg_to_par = float((score - par).mean()) if len(score) else 0.0
+
+    def _avg_for_par(par_value):
+        vals = score[par == par_value]
+        if len(vals):
+            return float(vals.mean())
+        return float(par_value) + avg_to_par
+
+    return (4.0 * _avg_for_par(3)) + (10.0 * _avg_for_par(4)) + (4.0 * _avg_for_par(5))
+
+
+def _standardized_to_par_per18(frame):
+    return _standardized_score_per18(frame) - 72.0
+
+
 def _baseline_label(mode, per18=False):
     mapping = {
         "All Time": "All-Time Avg",
@@ -832,7 +867,12 @@ def build_overview_snapshot(frame):
     scramble_ops = pd.to_numeric(_safe_col(d, "Scramble Opportunity", 0), errors="coerce").fillna(0).sum()
     updown_made = (((gir == 0) & (putts == 1)).sum())
 
-    avg_prox = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", 0), errors="coerce").replace(0, pd.NA).mean()
+    prox_series = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", pd.NA), errors="coerce")
+    valid_prox = prox_series.notna() & (prox_series > 0)
+    avg_prox = prox_series[valid_prox].mean()
+    avg_prox_gir = prox_series[valid_prox & (gir == 1)].mean()
+    avg_prox_no_gir = prox_series[valid_prox & (gir == 0)].mean()
+
     lost_balls = (
         pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0).sum()
         + pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0).sum()
@@ -842,14 +882,7 @@ def build_overview_snapshot(frame):
 
     total_score = float(score.sum())
 
-    par3_scores = pd.to_numeric(d.loc[par == 3, "Hole Score"], errors="coerce").dropna()
-    par4_scores = pd.to_numeric(d.loc[par == 4, "Hole Score"], errors="coerce").dropna()
-    par5_scores = pd.to_numeric(d.loc[par == 5, "Hole Score"], errors="coerce").dropna()
-
-    avg_par3 = float(par3_scores.mean()) if len(par3_scores) else 0.0
-    avg_par4 = float(par4_scores.mean()) if len(par4_scores) else 0.0
-    avg_par5 = float(par5_scores.mean()) if len(par5_scores) else 0.0
-    weighted_score_per18 = (4 * avg_par3) + (10 * avg_par4) + (4 * avg_par5)
+    weighted_score_per18 = _standardized_score_per18(d)
 
     return {
         "holes": holes,
@@ -863,6 +896,8 @@ def build_overview_snapshot(frame):
         "arnies_per18": _per18(float(arnies), holes),
         "seves_per18": _per18(float(seves), holes),
         "avg_prox": float(avg_prox) if pd.notna(avg_prox) else 0.0,
+        "avg_prox_gir": float(avg_prox_gir) if pd.notna(avg_prox_gir) else 0.0,
+        "avg_prox_no_gir": float(avg_prox_no_gir) if pd.notna(avg_prox_no_gir) else 0.0,
         "lost_balls_per18": _per18(float(lost_balls), holes),
     }
 
@@ -1521,16 +1556,15 @@ def build_baseline_summary(frame, compare_mode="Baseline"):
     avg_score = None
     avg_to_par = None
     if round_col and round_col in d.columns:
-        per_round = d.groupby(round_col, dropna=True).agg(
-            Score=("Hole Score", "sum"),
-            ParTotal=("Par", "sum")
-        )
-        if not per_round.empty:
-            avg_score = float(per_round["Score"].mean())
-            avg_to_par = float((per_round["Score"] - per_round["ParTotal"]).mean())
+        per_round_scores = []
+        for _, block in d.groupby(round_col, dropna=True):
+            per_round_scores.append(_standardized_score_per18(block))
+        if per_round_scores:
+            avg_score = float(pd.Series(per_round_scores).mean())
+            avg_to_par = avg_score - 72.0
     else:
-        avg_score = float(d["Hole Score"].sum())
-        avg_to_par = float(d["Hole Score"].sum() - d["Par"].sum())
+        avg_score = _standardized_score_per18(d)
+        avg_to_par = avg_score - 72.0
 
     return {
         "rounds": rounds,
@@ -3638,6 +3672,8 @@ def build_overview_metric_rows(round_overview, base_overview, compare_label):
         {"Metric": "Arnies / 18", "Round": round_overview["arnies_per18"], "Baseline": base_overview["arnies_per18"], "Better": "Higher", "Fmt": "{:.2f}"},
         {"Metric": "Seves / 18", "Round": round_overview["seves_per18"], "Baseline": base_overview["seves_per18"], "Better": "Higher", "Fmt": "{:.2f}"},
         {"Metric": "Avg First-Putt Proximity", "Round": round_overview["avg_prox"], "Baseline": base_overview["avg_prox"], "Better": "Lower", "Fmt": "{:.1f} ft"},
+        {"Metric": "Avg Prox if GIR", "Round": round_overview["avg_prox_gir"], "Baseline": base_overview["avg_prox_gir"], "Better": "Lower", "Fmt": "{:.1f} ft"},
+        {"Metric": "Avg Prox if No GIR", "Round": round_overview["avg_prox_no_gir"], "Baseline": base_overview["avg_prox_no_gir"], "Better": "Lower", "Fmt": "{:.1f} ft"},
         {"Metric": "Lost Balls / 18", "Round": round_overview["lost_balls_per18"], "Baseline": base_overview["lost_balls_per18"], "Better": "Lower", "Fmt": "{:.2f}"},
     ]
     out = pd.DataFrame(rows)
@@ -4156,14 +4192,7 @@ def build_trends_round_frame(frame):
         gir0 = (pd.to_numeric(block["GIR"], errors="coerce").fillna(0) == 0)
         putt1 = (pd.to_numeric(block["Putts"], errors="coerce").fillna(0) == 1)
 
-        par3_scores = pd.to_numeric(block.loc[block["Par"] == 3, "Hole Score"], errors="coerce").dropna()
-        par4_scores = pd.to_numeric(block.loc[block["Par"] == 4, "Hole Score"], errors="coerce").dropna()
-        par5_scores = pd.to_numeric(block.loc[block["Par"] == 5, "Hole Score"], errors="coerce").dropna()
-
-        avg_par3 = float(par3_scores.mean()) if len(par3_scores) else 0.0
-        avg_par4 = float(par4_scores.mean()) if len(par4_scores) else 0.0
-        avg_par5 = float(par5_scores.mean()) if len(par5_scores) else 0.0
-        score_per18 = (4 * avg_par3) + (10 * avg_par4) + (4 * avg_par5)
+        score_per18 = _standardized_score_per18(block)
 
         return pd.Series({
             "Date": pd.to_datetime(block["Date Played"], errors="coerce").max(),
@@ -4810,10 +4839,865 @@ def render_trend_vs_baseline_chart(trend_df, value_col, roll_col, title, y_title
     st.altair_chart((base_rule + actual + roll).properties(height=280, title=title).configure_view(strokeOpacity=0), use_container_width=True)
 
 
+
+
+
+# =========================================================
+# Estimated Handicap Helpers
+# =========================================================
+HANDICAP_DEFAULT_RATING_18 = 72.0
+HANDICAP_DEFAULT_SLOPE = 113.0
+
+def _first_existing_col(frame, candidates):
+    for col in candidates:
+        if col in frame.columns:
+            return col
+    return None
+
+def _score_differential_count_to_use(n):
+    """WHS-style count of differentials to average.
+    This is an estimate for dashboard use, not an official handicap service.
+    """
+    n = int(n or 0)
+    if n <= 0:
+        return 0
+    if n <= 3:
+        return 1
+    if n == 4:
+        return 1
+    if n == 5:
+        return 1
+    if n == 6:
+        return 2
+    if n in [7, 8]:
+        return 2
+    if n in [9, 10, 11]:
+        return 3
+    if n in [12, 13, 14]:
+        return 4
+    if n in [15, 16]:
+        return 5
+    if n in [17, 18]:
+        return 6
+    if n == 19:
+        return 7
+    return 8
+
+def _score_differential_adjustment(n):
+    """Small low-sample adjustment approximating WHS early-record handling."""
+    n = int(n or 0)
+    if n <= 3:
+        return -2.0
+    if n == 4:
+        return -1.0
+    if n == 6:
+        return -1.0
+    return 0.0
+
+def _round_differentials_for_frame(frame):
+    """Build normalized 18-hole score differentials by round.
+
+    If Course Rating / Slope Rating columns exist, they are used.
+    If not, the fallback assumes a standard course: 72.0 rating and 113 slope.
+    Partial rounds are scaled to 18 holes so 9-hole and other partial samples can contribute.
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Round Link", "Date Played", "ScoreDiff", "Holes", "Score18", "Rating18", "Slope", "Source"])
+
+    d = frame.copy()
+    d["Date Played"] = pd.to_datetime(_safe_col(d, "Date Played", pd.NaT), errors="coerce")
+    d["Hole Score"] = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+    d["Par"] = pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+
+    round_col = _resolve_round_col(d)
+    if not round_col or round_col not in d.columns:
+        d["__RoundKey"] = "Single Sample"
+        round_col = "__RoundKey"
+
+    rating_col = _first_existing_col(d, [
+        "Course Rating", "CourseRating", "Course Rating (18)", "Rating",
+        "course_rating", "course rating"
+    ])
+    slope_col = _first_existing_col(d, [
+        "Slope Rating", "SlopeRating", "Course Slope", "Slope",
+        "slope_rating", "slope rating"
+    ])
+
+    rows = []
+    for rid, block in d.groupby(round_col, dropna=True):
+        holes = int(len(block))
+        if holes <= 0:
+            continue
+        score = float(pd.to_numeric(block["Hole Score"], errors="coerce").fillna(0).sum())
+        par_total = float(pd.to_numeric(block["Par"], errors="coerce").fillna(0).sum())
+        date_played = pd.to_datetime(block["Date Played"], errors="coerce").max()
+
+        # Normalize played score to a standard par-72 18-hole equivalent.
+        # This avoids skew from 9-hole rounds, par-3 courses, and unusual par mixes.
+        score18 = _standardized_score_per18(block)
+        par18 = 72.0
+
+        rating18 = None
+        source = "default rating/slope"
+        if rating_col:
+            rating_vals = pd.to_numeric(block[rating_col], errors="coerce").dropna()
+            if len(rating_vals):
+                rating_raw = float(rating_vals.iloc[0])
+                # If a 9-hole/partial rating appears to be supplied, scale it to 18.
+                rating18 = rating_raw * (18.0 / holes) if holes < 18 and rating_raw < 55 else rating_raw
+                source = "course rating/slope"
+
+        if rating18 is None or rating18 <= 0:
+            # Neutral fallback: standard 72 rating, adjusted only if the sample is clearly not a par-72 equivalent.
+            rating18 = HANDICAP_DEFAULT_RATING_18 if abs(par18 - 72.0) <= 4.0 else par18
+
+        slope = HANDICAP_DEFAULT_SLOPE
+        if slope_col:
+            slope_vals = pd.to_numeric(block[slope_col], errors="coerce").dropna()
+            if len(slope_vals) and float(slope_vals.iloc[0]) > 0:
+                slope = float(slope_vals.iloc[0])
+
+        score_diff = (score18 - rating18) * 113.0 / slope
+        rows.append({
+            "Round Link": rid,
+            "Date Played": date_played,
+            "ScoreDiff": round(float(score_diff), 1),
+            "Holes": holes,
+            "Score18": round(float(score18), 1),
+            "Rating18": round(float(rating18), 1),
+            "Slope": round(float(slope), 0),
+            "Source": source,
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values("Date Played", ascending=False).reset_index(drop=True)
+
+def estimate_player_handicap(frame):
+    diffs = _round_differentials_for_frame(frame)
+    if diffs.empty:
+        return {"handicap": pd.NA, "rounds": 0, "holes": 0, "used": 0, "source": "No rounds", "differentials": diffs}
+
+    # Use the most recent 20 round-level differentials, similar to WHS.
+    recent = diffs.sort_values("Date Played", ascending=False).head(20).copy()
+    n = int(len(recent))
+    k = _score_differential_count_to_use(n)
+    if k <= 0:
+        return {"handicap": pd.NA, "rounds": n, "holes": int(recent["Holes"].sum()), "used": 0, "source": "No usable differentials", "differentials": recent}
+
+    used = recent.sort_values("ScoreDiff", ascending=True).head(k).copy()
+    estimate = float(used["ScoreDiff"].mean()) + _score_differential_adjustment(n)
+    estimate = max(0.0, estimate)
+
+    return {
+        "handicap": round(estimate, 1),
+        "rounds": n,
+        "holes": int(recent["Holes"].sum()),
+        "used": k,
+        "source": "estimated from recent score differentials",
+        "differentials": recent,
+    }
+
+def _format_handicap_value(x):
+    if pd.isna(x):
+        return "—"
+    return f"{float(x):.1f}"
+
+def render_handicap_estimate_box(frame, title="Estimated Handicap"):
+    est = estimate_player_handicap(frame)
+    handicap = est.get("handicap", pd.NA)
+    rounds = int(est.get("rounds", 0) or 0)
+    holes = int(est.get("holes", 0) or 0)
+    used = int(est.get("used", 0) or 0)
+    sample_note = "Good sample" if holes >= 360 else ("Limited sample" if holes >= 54 else "Very limited sample")
+
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(180deg,#1f2937 0%,#171717 100%); border:1px solid rgba(255,255,255,.11); border-radius:16px; padding:14px 16px; margin:8px 0 14px 0; box-shadow:0 8px 18px rgba(0,0,0,.18);">
+          <div style="font-size:12px; color:#bdbdbd; font-weight:800; text-transform:uppercase; letter-spacing:.05em;">{title}</div>
+          <div style="display:flex; align-items:flex-end; gap:14px; margin-top:4px;">
+            <div style="font-size:38px; color:#fff; font-weight:950; line-height:1;">{_format_handicap_value(handicap)}</div>
+            <div style="font-size:13px; color:#d7d7d7; padding-bottom:4px;">{sample_note}<br>{rounds} recent round(s) • {holes} hole(s) • best {used} differential(s)</div>
+          </div>
+          <div style="font-size:12px; color:#a9a9a9; margin-top:8px; line-height:1.35;">Estimate only. Uses score differential logic, normalizes partial rounds to 18 holes, and assumes 72.0 / 113 when rating or slope is missing.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    return est
+
+# =========================================================
+# Compare Tab Helpers
+# =========================================================
+COMPARE_METRIC_DEFS = [
+    ("Avg Score / 18", "score_per18", "lower", "{:.1f}"),
+    ("Score to Par / 18", "to_par_per18", "lower", "{:+.1f}"),
+    ("Putts / 18", "putts_per18", "lower", "{:.1f}"),
+    ("GIR %", "gir_pct", "higher", "{:.1f}%"),
+    ("Fairway %", "fw_pct", "higher", "{:.1f}%"),
+    ("Scramble %", "scramble_pct", "higher", "{:.1f}%"),
+    ("Up & Down %", "updown_pct", "higher", "{:.1f}%"),
+    ("1-Putt %", "one_putt_pct", "higher", "{:.1f}%"),
+    ("3+ Putt %", "three_plus_putt_pct", "lower", "{:.1f}%"),
+    ("Birdie Conversion % (GIR)", "birdie_conv_gir_pct", "higher", "{:.1f}%"),
+    ("Avg First-Putt Proximity", "avg_first_putt_prox", "lower", "{:.1f} ft"),
+    ("Avg Prox if GIR", "avg_prox_gir", "lower", "{:.1f} ft"),
+    ("Avg Prox if No GIR", "avg_prox_no_gir", "lower", "{:.1f} ft"),
+    ("Arnies / 18", "arnies_per18", "higher", "{:.2f}"),
+    ("Seves / 18", "seves_per18", "higher", "{:.2f}"),
+    ("Lost Balls / 18", "lost_balls_per18", "lower", "{:.2f}"),
+    ("Pro Pars+ / 18", "pro_pars_plus_per18", "higher", "{:.2f}"),
+    ("Hole Outs / 18", "hole_outs_per18", "higher", "{:.2f}"),
+    ("Estimated Handicap", "estimated_handicap", "lower", "{:.1f}"),
+]
+
+COMPARE_METRIC_LABELS = [m[0] for m in COMPARE_METRIC_DEFS]
+COMPARE_METRIC_BY_LABEL = {m[0]: m for m in COMPARE_METRIC_DEFS}
+
+
+def _compare_score_to_par_series(d):
+    if "Score to Par" in d.columns:
+        return pd.to_numeric(_safe_col(d, "Score to Par", 0), errors="coerce").fillna(0)
+    return (
+        pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+        - pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+    )
+
+
+def _compare_one_player_summary(player_name, frame):
+    d = frame.copy()
+    holes = int(len(d))
+    round_col = _resolve_round_col(d)
+    rounds = int(d[round_col].dropna().nunique()) if round_col and round_col in d.columns else (1 if holes else 0)
+
+    score = pd.to_numeric(_safe_col(d, "Hole Score", 0), errors="coerce").fillna(0)
+    par = pd.to_numeric(_safe_col(d, "Par", 0), errors="coerce").fillna(0)
+    putts = pd.to_numeric(_safe_col(d, "Putts", 0), errors="coerce").fillna(0)
+    gir = pd.to_numeric(_safe_col(d, "GIR", 0), errors="coerce").fillna(0)
+
+    fw_block = d[par.isin([4, 5])].copy() if holes else d.iloc[0:0].copy()
+    fw = pd.to_numeric(_safe_col(fw_block, "Fairway", 0), errors="coerce").fillna(0) if not fw_block.empty else pd.Series(dtype=float)
+
+    scramble_made = pd.to_numeric(_safe_col(d, "Scramble", 0), errors="coerce").fillna(0).sum()
+    scramble_ops = pd.to_numeric(_safe_col(d, "Scramble Opportunity", 0), errors="coerce").fillna(0).sum()
+
+    one_putts = int((putts == 1).sum())
+    three_plus_putts = int((putts >= 3).sum())
+
+    score_to_par = _compare_score_to_par_series(d)
+    birdie_or_better_on_gir = int(((gir == 1) & (score_to_par < 0)).sum())
+    gir_made = int(gir.sum())
+
+    first_putt_prox = pd.to_numeric(_safe_col(d, "Proximity to Hole - How far is your First Putt (FT)", pd.NA), errors="coerce").replace(0, pd.NA)
+    avg_first_putt_prox = float(first_putt_prox.mean()) if first_putt_prox.notna().any() else 0.0
+
+    prox_gir = first_putt_prox[gir == 1]
+    prox_no_gir = first_putt_prox[gir == 0]
+
+    arnies = pd.to_numeric(_safe_col(d, "Arnie", 0), errors="coerce").fillna(0).sum()
+    seves = pd.to_numeric(_safe_col(d, "Seve", 0), errors="coerce").fillna(0).sum()
+    lost_balls = (
+        pd.to_numeric(_safe_col(d, "Lost Ball Tee Shot Quantity", 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(_safe_col(d, "Lost Ball Approach Shot Quantity", 0), errors="coerce").fillna(0).sum()
+    )
+
+    pro_pars_plus = (
+        pd.to_numeric(_safe_col(d, "Pro Par", 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(_safe_col(d, "Pro Birdie", 0), errors="coerce").fillna(0).sum()
+        + pd.to_numeric(_safe_col(d, "Pro Eagle+", 0), errors="coerce").fillna(0).sum()
+    )
+    hole_outs = build_short_game_hole_out_stats(d)["count"] if holes else 0
+    handicap_estimate = estimate_player_handicap(d)["handicap"] if holes else pd.NA
+
+    return {
+        "Player": str(player_name),
+        "Rounds": rounds,
+        "Holes": holes,
+        "score_per18": _standardized_score_per18(d),
+        "to_par_per18": _standardized_to_par_per18(d),
+        "putts_per18": _per18(float(putts.sum()), holes),
+        "gir_pct": (float(gir.sum()) / holes * 100.0) if holes else 0.0,
+        "fw_pct": (float(fw.sum()) / len(fw) * 100.0) if len(fw) else 0.0,
+        "scramble_pct": (float(scramble_made) / float(scramble_ops) * 100.0) if scramble_ops else 0.0,
+        "updown_pct": (float(((gir == 0) & (putts == 1)).sum()) / float(scramble_ops) * 100.0) if scramble_ops else 0.0,
+        "one_putt_pct": (one_putts / holes * 100.0) if holes else 0.0,
+        "three_plus_putt_pct": (three_plus_putts / holes * 100.0) if holes else 0.0,
+        "birdie_conv_gir_pct": (birdie_or_better_on_gir / gir_made * 100.0) if gir_made else 0.0,
+        "avg_first_putt_prox": avg_first_putt_prox,
+        "avg_prox_gir": float(prox_gir.mean()) if prox_gir.notna().any() else 0.0,
+        "avg_prox_no_gir": float(prox_no_gir.mean()) if prox_no_gir.notna().any() else 0.0,
+        "arnies_per18": _per18(float(arnies), holes),
+        "seves_per18": _per18(float(seves), holes),
+        "lost_balls_per18": _per18(float(lost_balls), holes),
+        "pro_pars_plus_per18": _per18(float(pro_pars_plus), holes),
+        "hole_outs_per18": _per18(float(hole_outs), holes),
+        "estimated_handicap": handicap_estimate,
+    }
+
+
+def build_compare_player_summary(compare_df):
+    if compare_df is None or compare_df.empty or "Player Name" not in compare_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for player_name, block in compare_df.groupby("Player Name", dropna=True):
+        rows.append(_compare_one_player_summary(player_name, block))
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Holes", "Player"], ascending=[False, True]).reset_index(drop=True)
+
+
+def build_compare_year_summary(compare_df, label_mode="year"):
+    """Build Compare-tab summaries grouped by Year or Player-Year.
+
+    label_mode:
+      - "year": one row per year, label shown as 2025 / 2026
+      - "player_year": one row per player-year, label shown as Jake 2025
+    """
+    if compare_df is None or compare_df.empty or "Year" not in compare_df.columns:
+        return pd.DataFrame()
+
+    d = compare_df.copy()
+    d["Year"] = pd.to_numeric(_safe_col(d, "Year", pd.NA), errors="coerce")
+    d = d.dropna(subset=["Year"]).copy()
+    if d.empty:
+        return pd.DataFrame()
+    d["Year"] = d["Year"].astype(int)
+
+    rows = []
+    if label_mode == "player_year" and "Player Name" in d.columns:
+        group_cols = ["Player Name", "Year"]
+        for (player_name, yr), block in d.groupby(group_cols, dropna=True):
+            row = _compare_one_player_summary(str(player_name), block)
+            row["Player"] = f"{player_name} {int(yr)}"
+            row["Base Player"] = str(player_name)
+            row["Year"] = int(yr)
+            rows.append(row)
+    else:
+        for yr, block in d.groupby("Year", dropna=True):
+            label = str(int(yr))
+            row = _compare_one_player_summary(label, block)
+            row["Player"] = label
+            row["Year"] = int(yr)
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    sort_cols = [c for c in ["Year", "Base Player", "Player"] if c in out.columns]
+    return out.sort_values(sort_cols).reset_index(drop=True)
+
+
+def build_compare_yoy_variance_table(summary_df, metric_labels, base_label, current_label):
+    """Build year-over-year variance table with stat-aware trend arrows."""
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(), {}
+
+    base_rows = summary_df[summary_df["Player"].astype(str) == str(base_label)]
+    curr_rows = summary_df[summary_df["Player"].astype(str) == str(current_label)]
+    if base_rows.empty or curr_rows.empty:
+        return pd.DataFrame(), {}
+
+    base = base_rows.iloc[0]
+    curr = curr_rows.iloc[0]
+    rows = []
+    improved = declined = flat = 0
+    best_gain = None
+    worst_drop = None
+
+    for metric_label in metric_labels:
+        _label, key, better, _fmt = COMPARE_METRIC_BY_LABEL[metric_label]
+        old_val = pd.to_numeric(base.get(key, pd.NA), errors="coerce")
+        new_val = pd.to_numeric(curr.get(key, pd.NA), errors="coerce")
+        if pd.isna(old_val) or pd.isna(new_val):
+            continue
+        delta = float(new_val) - float(old_val)
+        good_delta = -delta if better == "lower" else delta
+        if abs(good_delta) <= 0.05:
+            trend = "➡️ Flat"
+            flat += 1
+        elif good_delta > 0:
+            trend = "🔼 Better"
+            improved += 1
+        else:
+            trend = "🔽 Worse"
+            declined += 1
+
+        if best_gain is None or good_delta > best_gain["good_delta"]:
+            best_gain = {"metric": metric_label, "good_delta": good_delta, "delta": delta}
+        if worst_drop is None or good_delta < worst_drop["good_delta"]:
+            worst_drop = {"metric": metric_label, "good_delta": good_delta, "delta": delta}
+
+        rows.append({
+            "Metric": metric_label,
+            str(base_label): _format_compare_value(metric_label, old_val),
+            str(current_label): _format_compare_value(metric_label, new_val),
+            "Change": _format_yoy_delta(metric_label, delta),
+            "Trend": trend,
+            "GoodDelta": good_delta,
+        })
+
+    table = pd.DataFrame(rows)
+    summary = {
+        "improved": improved,
+        "declined": declined,
+        "flat": flat,
+        "best_gain": best_gain,
+        "worst_drop": worst_drop,
+    }
+    return table, summary
+
+
+def _format_yoy_delta(metric_label, delta):
+    if metric_label not in COMPARE_METRIC_BY_LABEL:
+        return f"{delta:+.1f}"
+    _label, _key, _better, fmt = COMPARE_METRIC_BY_LABEL[metric_label]
+    if "%" in fmt:
+        return f"{delta:+.1f} pts"
+    if "ft" in fmt:
+        return f"{delta:+.1f} ft"
+    if ".2f" in fmt:
+        return f"{delta:+.1f}"
+    return f"{delta:+.1f}"
+
+
+def render_compare_yoy_summary_cards(variance_summary, base_label, current_label):
+    improved = int(variance_summary.get("improved", 0) or 0)
+    declined = int(variance_summary.get("declined", 0) or 0)
+    flat = int(variance_summary.get("flat", 0) or 0)
+    best_gain = variance_summary.get("best_gain")
+    worst_drop = variance_summary.get("worst_drop")
+
+    best_txt = "—"
+    if best_gain:
+        best_txt = f"{best_gain['metric']} ({_format_yoy_delta(best_gain['metric'], best_gain['delta'])})"
+    worst_txt = "—"
+    if worst_drop:
+        worst_txt = f"{worst_drop['metric']} ({_format_yoy_delta(worst_drop['metric'], worst_drop['delta'])})"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Improved Metrics", improved)
+    c2.metric("Declined Metrics", declined)
+    c3.metric("Flat Metrics", flat)
+    c4.metric("Comparison", f"{base_label} → {current_label}")
+
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(180deg,#202a25 0%,#1f1f1f 100%); border:1px solid rgba(100,223,181,.14); border-radius:14px; padding:12px 14px; margin:8px 0 12px 0; line-height:1.55;">
+          <b>✅ Biggest gain:</b> {best_txt}<br>
+          <b>👀 Biggest drop:</b> {worst_txt}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_compare_yoy_trend_chart(summary_df, metric_label):
+    if summary_df is None or summary_df.empty or "Year" not in summary_df.columns:
+        st.info("No year trend data available.")
+        return
+    _label, key, better, _fmt = COMPARE_METRIC_BY_LABEL[metric_label]
+    plot_df = summary_df[["Player", "Year", key]].copy()
+    plot_df = plot_df.rename(columns={key: "Value"})
+    plot_df["Value"] = pd.to_numeric(plot_df["Value"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Value", "Year"]).copy()
+    if plot_df.empty:
+        st.info("No usable values for this year trend metric.")
+        return
+    plot_df["Display"] = plot_df["Value"].apply(lambda x: _format_compare_value(metric_label, x))
+    chart = (
+        alt.Chart(plot_df)
+        .mark_line(point=True, strokeWidth=3)
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("Value:Q", title=metric_label),
+            color=alt.Color("Player:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("Player:N", title="Series"),
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Display:N", title=metric_label),
+            ],
+        )
+        .properties(height=330, title=f"{metric_label} — Year Trend")
+        .configure_view(strokeOpacity=0)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _format_compare_value(metric_label, value):
+    if pd.isna(value):
+        return "—"
+    _, _, _, fmt = COMPARE_METRIC_BY_LABEL[metric_label]
+    try:
+        return fmt.format(float(value))
+    except Exception:
+        return "—"
+
+
+def _style_compare_detail_table(detail_df):
+    """Format the Compare tab detail table with clean decimals and percent signs.
+    Percent metrics are already stored as 0-100 values, so this adds a percent sign
+    without rescaling.
+    """
+    if detail_df is None or detail_df.empty:
+        return detail_df
+
+    fmt = {
+        "Rounds": lambda x: "—" if pd.isna(x) else f"{int(round(float(x))):,}",
+        "Holes": lambda x: "—" if pd.isna(x) else f"{int(round(float(x))):,}",
+    }
+
+    for label, _key, _better, metric_fmt in COMPARE_METRIC_DEFS:
+        if label not in detail_df.columns:
+            continue
+        if "%" in metric_fmt:
+            fmt[label] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f}%"
+        elif "ft" in metric_fmt:
+            fmt[label] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f} ft"
+        elif metric_fmt.startswith("{:+"):
+            fmt[label] = lambda x: "—" if pd.isna(x) else f"{float(x):+.1f}"
+        elif ".2f" in metric_fmt:
+            # Keep per-18 event stats readable without excessive digits.
+            fmt[label] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f}"
+        else:
+            fmt[label] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f}"
+
+    try:
+        return detail_df.style.format(fmt, na_rep="—")
+    except Exception:
+        return detail_df
+
+
+def build_compare_metric_matrix(summary_df, metric_labels):
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for metric_label in metric_labels:
+        _, key, better, _ = COMPARE_METRIC_BY_LABEL[metric_label]
+        row = {"Metric": metric_label, "Better": "Lower" if better == "lower" else "Higher"}
+        vals = []
+        for _, player_row in summary_df.iterrows():
+            player_name = str(player_row["Player"])
+            raw_val = player_row.get(key, pd.NA)
+            vals.append((player_name, raw_val))
+            row[player_name] = _format_compare_value(metric_label, raw_val)
+
+        numeric_vals = [(p, float(v)) for p, v in vals if pd.notna(v)]
+        if numeric_vals:
+            if better == "lower":
+                best_val = min(v for _, v in numeric_vals)
+            else:
+                best_val = max(v for _, v in numeric_vals)
+            winners = [p for p, v in numeric_vals if abs(v - best_val) < 1e-9]
+            row["Leader"] = ", ".join(winners)
+        else:
+            row["Leader"] = "—"
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def render_compare_metric_chart(summary_df, metric_label):
+    if summary_df is None or summary_df.empty:
+        st.info("No comparison data available for the selected filters.")
+        return
+
+    _, key, better, _ = COMPARE_METRIC_BY_LABEL[metric_label]
+    plot_df = summary_df[["Player", "Holes", key]].copy()
+    plot_df = plot_df.rename(columns={key: "Value"})
+    plot_df["Value"] = pd.to_numeric(plot_df["Value"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Value"]).copy()
+    if plot_df.empty:
+        st.info("No usable values for this selected metric.")
+        return
+
+    sort_order = "ascending" if better == "lower" else "descending"
+    plot_df["Display"] = plot_df["Value"].apply(lambda x: _format_compare_value(metric_label, x))
+
+    base = alt.Chart(plot_df)
+
+    chart = (
+        base
+        .mark_bar(cornerRadiusTopRight=8, cornerRadiusBottomRight=8)
+        .encode(
+            y=alt.Y("Player:N", sort=alt.EncodingSortField(field="Value", op="sum", order=sort_order), title=None),
+            x=alt.X("Value:Q", title=metric_label),
+            tooltip=[
+                alt.Tooltip("Player:N"),
+                alt.Tooltip("Display:N", title=metric_label),
+                alt.Tooltip("Holes:Q", title="Holes", format=",.0f"),
+            ],
+        )
+    )
+
+    labels = (
+        base
+        .mark_text(align="left", dx=6, fontWeight="bold", color="white")
+        .encode(
+            y=alt.Y("Player:N", sort=alt.EncodingSortField(field="Value", op="sum", order=sort_order)),
+            x=alt.X("Value:Q"),
+            text="Display:N",
+        )
+    )
+
+    combined = (
+        alt.layer(chart, labels)
+        .properties(height=max(260, 42 * len(plot_df)), title=f"{metric_label} — Player Compare")
+        .configure_view(strokeOpacity=0, clip=False)
+        .configure_axis(
+            labelColor="white",
+            titleColor="white",
+            gridColor="rgba(255,255,255,0.10)",
+            tickColor="rgba(255,255,255,0.20)",
+            domainColor="rgba(255,255,255,0.20)",
+        )
+    )
+    st.altair_chart(combined, use_container_width=True)
+
+
+def render_compare_leader_cards(summary_df):
+    if summary_df is None or summary_df.empty:
+        return
+
+    card_defs = [
+        ("Best Scoring", "Avg Score / 18"),
+        ("Lowest Est. Handicap", "Estimated Handicap"),
+        ("Best GIR", "GIR %"),
+        ("Best Putting", "Putts / 18"),
+        ("Best Birdie Conversion", "Birdie Conversion % (GIR)"),
+    ]
+
+    cols = st.columns(len(card_defs))
+    for col, (card_title, metric_label) in zip(cols, card_defs):
+        _label, key, better, _fmt = COMPARE_METRIC_BY_LABEL[metric_label]
+        vals = summary_df[["Player", key, "Holes"]].copy()
+        vals[key] = pd.to_numeric(vals[key], errors="coerce")
+        vals["Holes"] = pd.to_numeric(vals["Holes"], errors="coerce").fillna(0).astype(int)
+        vals = vals.dropna(subset=[key])
+        if vals.empty:
+            with col:
+                st.metric(card_title, "—")
+            continue
+
+        vals = vals.sort_values(
+            [key, "Holes", "Player"],
+            ascending=[True if better == "lower" else False, False, True]
+        ).reset_index(drop=True)
+        vals["Rank"] = vals.index + 1
+        best = vals.iloc[0]
+
+        rank_rows = []
+        for _, r in vals.head(5).iterrows():
+            rank_rows.append(
+                f"""
+                <div style="display:flex; justify-content:space-between; gap:8px; padding:3px 0; border-top:1px solid rgba(255,255,255,.07);">
+                  <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                    <b>#{int(r['Rank'])}</b> {r['Player']}
+                  </span>
+                  <span style="font-variant-numeric:tabular-nums; font-weight:800; white-space:nowrap;">
+                    {_format_compare_value(metric_label, r[key])}
+                  </span>
+                </div>
+                """
+            )
+
+        with col:
+            st.markdown(
+                f"""
+                <div style="background:linear-gradient(180deg,#2b2b2b 0%,#1f1f1f 100%); border:1px solid rgba(255,255,255,.10); border-radius:16px; padding:13px 14px; min-height:170px; box-shadow:0 8px 18px rgba(0,0,0,.18);">
+                  <div style="font-size:12px; color:#bdbdbd; font-weight:800; text-transform:uppercase; letter-spacing:.04em; margin-bottom:5px;">{card_title}</div>
+                  <div style="font-size:23px; color:#fff; font-weight:950; line-height:1.15; margin-bottom:2px;">#{int(best['Rank'])} {best['Player']}</div>
+                  <div style="font-size:15px; color:#64dfb5; font-weight:900; margin-bottom:8px;">{_format_compare_value(metric_label, best[key])}</div>
+                  <div style="font-size:12px; color:#e7e7e7; line-height:1.3;">{''.join(rank_rows)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_compare_tab(full_df):
+    st.markdown("### 🆚 Compare")
+    st.caption("Compare players across the same headline metrics from the Overview table, with independent filters for players, years, courses, months, trips, and date range.")
+
+    compare_view = st.radio(
+        "Compare View",
+        ["Player vs Player", "Year vs Year", "Player-Year Matrix"],
+        horizontal=True,
+        key="compare_view_mode",
+        help="Year vs Year is best for Jake 2025 vs Jake 2026. Player-Year Matrix lets you compare Jake 2025, Jake 2026, Brent 2025, Brent 2026, etc.",
+    )
+
+    work = full_df.copy()
+    work["Date Played"] = pd.to_datetime(_safe_col(work, "Date Played", pd.NaT), errors="coerce")
+    if "Year" not in work.columns:
+        work["Year"] = work["Date Played"].dt.year
+    if "Month" not in work.columns:
+        work["Month"] = work["Date Played"].dt.strftime("%B")
+
+    all_players = sorted([str(x) for x in _safe_col(work, "Player Name", "").dropna().astype(str).unique().tolist() if str(x).strip()])
+    all_courses = sorted([str(x) for x in _safe_col(work, "Course Name", "").dropna().astype(str).unique().tolist() if str(x).strip()])
+    all_years = sorted([int(x) for x in pd.to_numeric(_safe_col(work, "Year", pd.NA), errors="coerce").dropna().unique().tolist()], reverse=True)
+    month_order = list(pd.Series(pd.date_range("2026-01-01", periods=12, freq="MS")).dt.strftime("%B"))
+    all_months = [m for m in month_order if m in set(_safe_col(work, "Month", "").dropna().astype(str).tolist())]
+
+    default_players = []
+    if "player" in globals() and player in all_players:
+        default_players.append(player)
+    default_players += [p for p in all_players if p not in default_players][:3]
+
+    with st.container():
+        c1, c2, c3 = st.columns([1.35, 1, 1])
+        with c1:
+            cmp_players = st.multiselect("Players", options=all_players, default=default_players[:4], key="compare_players")
+        with c2:
+            cmp_years = st.multiselect("Years", options=all_years, default=all_years[:1] if all_years else [], key="compare_years")
+        with c3:
+            cmp_courses = st.multiselect("Courses", options=all_courses, default=[], key="compare_courses")
+
+        c4, c5, c6 = st.columns([1, 1, 1])
+        with c4:
+            cmp_months = st.multiselect("Months", options=all_months, default=[], key="compare_months")
+        with c5:
+            min_date = work["Date Played"].min()
+            max_date = work["Date Played"].max()
+            if pd.notna(min_date) and pd.notna(max_date):
+                cmp_date_range = st.date_input(
+                    "Date Range",
+                    value=(min_date.date(), max_date.date()),
+                    min_value=min_date.date(),
+                    max_value=max_date.date(),
+                    key="compare_date_range",
+                )
+            else:
+                cmp_date_range = None
+        with c6:
+            min_holes = st.number_input("Minimum holes per player", min_value=1, max_value=5000, value=18, step=1, key="compare_min_holes")
+
+        trip_options = []
+        if "Golf Trip" in work.columns:
+            trip_options = sorted([str(x) for x in work["Golf Trip"].dropna().astype(str).unique().tolist() if str(x).strip()])
+        if trip_options:
+            cmp_trips = st.multiselect("Golf Trip", options=trip_options, default=[], key="compare_trips")
+        else:
+            cmp_trips = []
+
+    compare_df = work.copy()
+    if cmp_players:
+        compare_df = compare_df[compare_df["Player Name"].astype(str).isin(cmp_players)].copy()
+    if compare_view == "Year vs Year" and len(cmp_players) != 1:
+        st.caption("Year vs Year works best with one selected player. If multiple players are selected, the years will be combined across those players. Use Player-Year Matrix for side-by-side player/year comparisons.")
+    if cmp_years:
+        compare_df = compare_df[pd.to_numeric(compare_df["Year"], errors="coerce").isin(cmp_years)].copy()
+    if cmp_courses:
+        compare_df = compare_df[compare_df["Course Name"].astype(str).isin(cmp_courses)].copy()
+    if cmp_months:
+        compare_df = compare_df[compare_df["Month"].astype(str).isin(cmp_months)].copy()
+    if cmp_trips and "Golf Trip" in compare_df.columns:
+        compare_df = compare_df[compare_df["Golf Trip"].astype(str).isin(cmp_trips)].copy()
+    if cmp_date_range and isinstance(cmp_date_range, tuple) and len(cmp_date_range) == 2:
+        start_date, end_date = cmp_date_range
+        compare_df = compare_df[
+            (compare_df["Date Played"].dt.date >= start_date)
+            & (compare_df["Date Played"].dt.date <= end_date)
+        ].copy()
+
+    if compare_view == "Player-Year Matrix":
+        summary_df = build_compare_year_summary(compare_df, label_mode="player_year")
+        empty_msg = "No player-year groups meet the selected Compare filters."
+    elif compare_view == "Year vs Year":
+        summary_df = build_compare_year_summary(compare_df, label_mode="year")
+        empty_msg = "No year groups meet the selected Compare filters."
+    else:
+        summary_df = build_compare_player_summary(compare_df)
+        empty_msg = "No players meet the selected Compare filters."
+
+    if not summary_df.empty:
+        summary_df = summary_df[pd.to_numeric(summary_df["Holes"], errors="coerce").fillna(0) >= int(min_holes)].copy()
+
+    if summary_df.empty:
+        st.info(empty_msg)
+        return
+
+    if compare_view == "Player vs Player":
+        render_compare_leader_cards(summary_df)
+    else:
+        st.caption(f"Compare groups shown: {len(summary_df)}")
+
+    metric_group = st.radio(
+        "Metric Set",
+        ["Core", "Scoring", "Ball Striking", "Putting", "Short Game", "All"],
+        horizontal=True,
+        key="compare_metric_group",
+    )
+
+    group_map = {
+        "Core": ["Estimated Handicap", "Avg Score / 18", "Score to Par / 18", "GIR %", "Fairway %", "Putts / 18", "Scramble %", "Birdie Conversion % (GIR)"],
+        "Scoring": ["Estimated Handicap", "Avg Score / 18", "Score to Par / 18", "Birdie Conversion % (GIR)", "Pro Pars+ / 18", "Arnies / 18", "Seves / 18", "Lost Balls / 18"],
+        "Ball Striking": ["GIR %", "Fairway %", "Avg First-Putt Proximity", "Avg Prox if GIR", "Avg Prox if No GIR", "Pro Pars+ / 18"],
+        "Putting": ["Putts / 18", "1-Putt %", "3+ Putt %", "Birdie Conversion % (GIR)", "Avg First-Putt Proximity"],
+        "Short Game": ["Scramble %", "Up & Down %", "Avg Prox if No GIR", "Arnies / 18", "Seves / 18", "Hole Outs / 18"],
+        "All": COMPARE_METRIC_LABELS,
+    }
+    selected_metric_labels = group_map.get(metric_group, COMPARE_METRIC_LABELS)
+
+    if compare_view == "Year vs Year":
+        year_labels = summary_df["Player"].astype(str).tolist()
+        if len(year_labels) >= 2:
+            default_base_idx = 0
+            default_current_idx = len(year_labels) - 1
+            yc1, yc2 = st.columns(2)
+            with yc1:
+                yoy_base = st.selectbox("Baseline Year", options=year_labels, index=default_base_idx, key="compare_yoy_base_year")
+            with yc2:
+                yoy_current = st.selectbox("Current Year", options=year_labels, index=default_current_idx, key="compare_yoy_current_year")
+
+            if yoy_base == yoy_current:
+                st.info("Pick two different years to show variance and trend.")
+            else:
+                variance_table, variance_summary = build_compare_yoy_variance_table(summary_df, selected_metric_labels, yoy_base, yoy_current)
+                st.markdown("#### Year-over-Year Trend Summary")
+                render_compare_yoy_summary_cards(variance_summary, yoy_base, yoy_current)
+                st.markdown("#### Year-over-Year Variance Table")
+                show_table = variance_table.drop(columns=["GoodDelta"], errors="ignore")
+                st.dataframe(show_table, use_container_width=True, hide_index=True)
+
+                st.markdown("#### Year Trend Chart")
+                yoy_chart_metric = st.selectbox("Year Trend Metric", options=selected_metric_labels, index=0, key="compare_yoy_chart_metric")
+                render_compare_yoy_trend_chart(summary_df, yoy_chart_metric)
+        else:
+            st.info("Select at least two years to show year-over-year variance and trend.")
+
+    st.markdown("#### Comparison Matrix")
+    matrix = build_compare_metric_matrix(summary_df, selected_metric_labels)
+    st.dataframe(matrix, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Visual Metric Compare")
+    chart_metric = st.selectbox("Chart Metric", options=selected_metric_labels, index=0, key="compare_chart_metric")
+    render_compare_metric_chart(summary_df, chart_metric)
+
+    st.markdown("#### Player Summary Detail")
+    detail_cols = ["Player", "Rounds", "Holes"] + [m[1] for m in COMPARE_METRIC_DEFS]
+    detail = summary_df[[c for c in detail_cols if c in summary_df.columns]].copy()
+    rename_map = {key: label for label, key, _, _ in COMPARE_METRIC_DEFS}
+    detail = detail.rename(columns=rename_map)
+    st.dataframe(_style_compare_detail_table(detail), use_container_width=True, hide_index=True)
+
+    with st.expander("Compare notes", expanded=False):
+        st.markdown("""
+        - **Avg Score / 18** and **Score to Par / 18** are normalized so 9-hole and 18-hole samples can be compared.
+        - **Birdie Conversion % (GIR)** is birdie-or-better holes divided by GIR made.
+        - **Avg Prox if GIR** shows approach quality on greens hit; **Avg Prox if No GIR** shows how playable misses are.
+        - **Estimated Handicap** is not official. It uses score differential logic, normalizes partial rounds to 18 holes, and falls back to a neutral 72.0 / 113 course assumption when rating or slope is missing.
+        - The minimum-holes filter helps avoid misleading leaders from tiny samples.
+        """)
+
 # =========================================================
 # Tabs
 # =========================================================
-tab_scorecard, tab_overview, tab_analysis, tab_putting, tab_trends, tab_bestof, tab_shortgame = st.tabs(["Scorecard", "Overview", "Analysis", "Putting", "Trends", "Best Of", "Short Game"])
+tab_scorecard, tab_overview, tab_compare, tab_analysis, tab_putting, tab_trends, tab_bestof, tab_shortgame = st.tabs(["Scorecard", "Overview", "Compare", "Ball Striking", "Putting", "Trends", "Best Of", "Short Game"])
 
 with tab_overview:
     st.markdown("### 📋 High-Level Overview")
@@ -4828,11 +5712,25 @@ with tab_overview:
     base_overview = build_overview_snapshot(benchmark_df)
     metric_df = build_overview_metric_rows(round_overview, base_overview, compare_label_overview)
 
-    render_baseline_summary_box(build_baseline_summary(benchmark_df, compare_mode_overview))
-    render_overview_cards(metric_df, compare_label_overview)
-    render_round_impact_cards(metric_df, compare_label_overview)
+    # Keep these detailed proximity splits in the comparison table, but remove
+    # them from the Overview box/card sections so the top layout does not compress.
+    overview_box_exclude = ["Avg Prox if GIR", "Avg Prox if No GIR"]
+    metric_df_boxes = metric_df[~metric_df["Metric"].isin(overview_box_exclude)].copy()
 
-    why_summary = build_why_round_happened(round_data, metric_df, compare_label_overview)
+    handicap_left, handicap_right = st.columns([1, 1])
+    with handicap_left:
+        current_handicap_est = render_handicap_estimate_box(player_df, title=f"Estimated Handicap — {player}")
+    with handicap_right:
+        if benchmark_df is not None and not benchmark_df.empty:
+            render_handicap_estimate_box(benchmark_df, title=f"Estimated Handicap — {compare_label_overview}")
+        else:
+            st.info("No baseline rounds available for handicap estimate.")
+
+    render_baseline_summary_box(build_baseline_summary(benchmark_df, compare_mode_overview))
+    render_overview_cards(metric_df_boxes, compare_label_overview)
+    render_round_impact_cards(metric_df_boxes, compare_label_overview)
+
+    why_summary = build_why_round_happened(round_data, metric_df_boxes, compare_label_overview)
     why_left, why_right = st.columns(2)
     with why_left:
         why_good_html = "<br>".join([f"• {x}" for x in why_summary["good"]])
@@ -4870,7 +5768,7 @@ with tab_overview:
 
     with top_right:
         st.markdown("#### Improvement Snapshot")
-        render_overview_delta_chart(metric_df, compare_label_overview)
+        render_overview_delta_chart(metric_df_boxes, compare_label_overview)
 
     quick1, quick2, quick3, quick4 = st.columns(4)
     with quick1:
@@ -5492,6 +6390,10 @@ with tab_scorecard:
         file_name=f"{player}_{course}_{date.replace(',', '')}_scorecard.html".replace(" ", "_"),
         mime="text/html"
     )
+
+with tab_compare:
+    render_compare_tab(df)
+
 
 with tab_analysis:
     st.markdown("### 🎯 Approach Breakdown")
