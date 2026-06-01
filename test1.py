@@ -79,6 +79,40 @@ def _safe_col(df, col, default=0):
 def _fmt_frac_pct(made, att):
     return f"{int(made)}/{int(att)} ({(100 * made / att):.1f}%)" if att else "0/0 (-)"
 
+def _format_golf_dataframe(df):
+    """Return a Styler with golf-stat columns formatted for clean Streamlit tables.
+    Percent columns are already stored as 0-100 values, so we add the % sign without rescaling.
+    """
+    if df is None or df.empty:
+        return df
+
+    fmt = {}
+    for col in df.columns:
+        col_s = str(col)
+        col_l = col_s.lower()
+
+        if any(token in col_l for token in ["%", "pct", "delta"]):
+            if "arrow" in col_l:
+                continue
+            if "delta" in col_l or col_s.startswith("Δ"):
+                fmt[col] = lambda x: "—" if pd.isna(x) else f"{float(x):+.1f}"
+            else:
+                fmt[col] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f}%"
+        elif any(token in col_l for token in ["avg prox", "proximity", "avg start", "start ft", "avg leave", "ft"]):
+            fmt[col] = lambda x: "—" if pd.isna(x) else f"{float(x):.1f}"
+        elif any(token in col_l for token in ["attempt", "made", "putts", "count", "holes", "inside"]):
+            fmt[col] = lambda x: "—" if pd.isna(x) else f"{int(round(float(x))):,}"
+
+    try:
+        return df.style.format(fmt, na_rep="—")
+    except Exception:
+        return df
+
+
+def _render_golf_dataframe(df, **kwargs):
+    """Streamlit dataframe wrapper with consistent percent/decimal formatting."""
+    st.dataframe(_format_golf_dataframe(df), **kwargs)
+
 def _fmt_to_par(n: int) -> str:
     return "E" if n == 0 else f"{'+' if n > 0 else ''}{n}"
 
@@ -851,6 +885,564 @@ def render_putting_distance_line_chart(summary_df, bucket_order, title, value_co
     st.altair_chart(chart, use_container_width=True)
 
 
+
+def _putting_fingerprint_for_chart(fp_df, series_label, metric="make"):
+    """
+    Convert build_putting_skill_fingerprint() output into a chart-friendly long frame.
+    metric='make' uses 1-putt percentage.
+    metric='three' uses 3+ putt percentage.
+    """
+    if fp_df is None or fp_df.empty:
+        return pd.DataFrame(columns=["Bucket", "Series", "Rate", "Attempts", "Count", "Label"])
+
+    d = fp_df.copy()
+    d = d[d["Bucket"].notna()].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Series", "Rate", "Attempts", "Count", "Label"])
+
+    d["Bucket"] = d["Bucket"].astype(str)
+    d["Attempts"] = pd.to_numeric(d.get("Attempts", 0), errors="coerce").fillna(0).astype(int)
+
+    if metric == "three":
+        rate_col = "ThreePuttPct"
+        count_col = "ThreePuttPlus"
+    else:
+        rate_col = "MakePct"
+        count_col = "OnePutt"
+
+    d["Rate"] = pd.to_numeric(d.get(rate_col, 0), errors="coerce").fillna(0.0)
+    d["Count"] = pd.to_numeric(d.get(count_col, 0), errors="coerce").fillna(0).astype(int)
+    d["Series"] = series_label
+    d["Label"] = d.apply(
+        lambda r: f"{int(r['Count'])}/{int(r['Attempts'])} • {float(r['Rate']):.1f}%" if int(r["Attempts"]) else "0/0 • 0.0%",
+        axis=1
+    )
+    return d[["Bucket", "Series", "Rate", "Attempts", "Count", "Label"]]
+
+
+def render_putting_distance_comparison_dashboard(
+    round_fp,
+    bench_fp,
+    bucket_order,
+    compare_label="Baseline",
+    overlay_fps=None,
+    show_round=True,
+    show_baseline=True,
+    title="Putting Distance Control — Player Comparison",
+):
+    """
+    Putting distance view:
+    - 1-putt % line by starting-distance bucket
+    - 3+ putt % line by starting-distance bucket
+    - optional selected-round line
+    - optional selected baseline line
+    - multiple player comparison overlays
+    - compact table with makes/attempts and percentages
+    """
+    overlay_fps = overlay_fps or []
+
+    r = round_fp.copy() if round_fp is not None else pd.DataFrame()
+    b = bench_fp.copy() if bench_fp is not None else pd.DataFrame()
+
+    st.markdown(f"#### {title}")
+    st.caption("Lines show conversion/risk by first-putt distance. Use the controls above to hide the selected round and compare multiple players cleanly.")
+
+    def _clean_fp(fp_df):
+        if fp_df is None or fp_df.empty:
+            return pd.DataFrame()
+        d = fp_df.copy()
+        if "Bucket" not in d.columns:
+            return pd.DataFrame()
+        return d[d["Bucket"].notna()].copy()
+
+    r = _clean_fp(r)
+    b = _clean_fp(b)
+
+    series_defs = []
+    if show_round and not r.empty:
+        series_defs.append(("This Round", r))
+    if show_baseline and not b.empty:
+        series_defs.append((compare_label, b))
+
+    for overlay_label, overlay_df in overlay_fps:
+        o = _clean_fp(overlay_df)
+        if overlay_label and not o.empty:
+            series_defs.append((str(overlay_label), o))
+
+    if not series_defs:
+        st.info("No usable putting distance data found for the selected comparison.")
+        return
+
+    def _build_metric_long(metric):
+        frames = []
+        for label, fp in series_defs:
+            frames.append(_putting_fingerprint_for_chart(fp, label, metric=metric))
+        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if out.empty:
+            return out
+        out = out[out["Bucket"].notna()].copy()
+        out["Bucket"] = pd.Categorical(out["Bucket"].astype(str), categories=bucket_order, ordered=True)
+        return out.sort_values(["Bucket", "Series"]).copy()
+
+    def _render_line_chart(plot_df, metric_title, y_title, height=300):
+        if plot_df is None or plot_df.empty:
+            st.info(f"No usable {metric_title.lower()} data found.")
+            return
+
+        chart = (
+            alt.Chart(plot_df)
+            .mark_line(point=True, strokeWidth=3)
+            .encode(
+                x=alt.X("Bucket:N", sort=bucket_order, title="Starting Distance"),
+                y=alt.Y("Rate:Q", title=y_title, scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("Series:N", title=None, legend=alt.Legend(orient="top")),
+                tooltip=[
+                    alt.Tooltip("Bucket:N", title="Distance"),
+                    alt.Tooltip("Series:N", title="Series"),
+                    alt.Tooltip("Count:Q", title="Count", format=",.0f"),
+                    alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
+                    alt.Tooltip("Rate:Q", title=y_title, format=".1f"),
+                    alt.Tooltip("Label:N", title="Summary"),
+                ],
+            )
+            .properties(height=height, title=metric_title)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor="white",
+                titleColor="white",
+                gridColor="rgba(255,255,255,0.10)",
+                tickColor="rgba(255,255,255,0.20)",
+                domainColor="rgba(255,255,255,0.20)",
+            )
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    make_df = _build_metric_long("make")
+    three_df = _build_metric_long("three")
+
+    _render_line_chart(make_df, "1-Putt Conversion by Starting Distance", "1-Putt %", height=320)
+    _render_line_chart(three_df, "3+ Putt Risk by Starting Distance", "3+ Putt %", height=280)
+
+    # ---------------------------
+    # Compact comparison table
+    # ---------------------------
+    table = pd.DataFrame({"Bucket": bucket_order})
+    for label, fp in series_defs:
+        block = fp[["Bucket", "Attempts", "OnePutt", "MakePct", "ThreePuttPlus", "ThreePuttPct"]].copy()
+        block["Bucket"] = block["Bucket"].astype(str)
+        block = block.rename(columns={
+            "Attempts": f"{label} Attempts",
+            "OnePutt": f"{label} 1-Putts",
+            "MakePct": f"{label} 1-Putt %",
+            "ThreePuttPlus": f"{label} 3+ Putts",
+            "ThreePuttPct": f"{label} 3+ Putt %",
+        })
+        table = table.merge(block, on="Bucket", how="left")
+
+    table["Bucket"] = pd.Categorical(table["Bucket"].astype(str), categories=bucket_order, ordered=True)
+    table = table.sort_values("Bucket").reset_index(drop=True)
+
+    # Keep empty buckets visible for context, but don't clutter with NaN.
+    for col in table.columns:
+        if col != "Bucket":
+            table[col] = pd.to_numeric(table[col], errors="coerce")
+
+    _render_golf_dataframe(table, use_container_width=True, hide_index=True)
+
+
+def summarize_approach_bucket_for_chart(frame):
+    """
+    Bucketed approach summary that works on either raw hole data or an already-prepared
+    frame returned by apply_approach_filters().
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    if "Approach Bucket" in frame.columns and "Approach GIR Flag" in frame.columns:
+        d = frame.copy()
+    else:
+        d = prepare_approach_frame(frame)
+
+    if d.empty or "Approach Bucket" not in d.columns:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    out = (
+        d.dropna(subset=["Approach Bucket"])
+         .groupby("Approach Bucket", as_index=False)
+         .agg(
+             Attempts=("Approach GIR Flag", "size"),
+             Made=("Approach GIR Flag", "sum"),
+             AvgProx=("Approach Proximity", "mean"),
+         )
+         .rename(columns={"Approach Bucket": "Bucket"})
+    )
+    if out.empty:
+        return pd.DataFrame(columns=["Bucket", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    out["Pct"] = (pd.to_numeric(out["Made"], errors="coerce").fillna(0) / pd.to_numeric(out["Attempts"], errors="coerce").replace(0, pd.NA) * 100).fillna(0).round(1)
+    out["Label"] = out.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {float(r['Pct']):.1f}% | Prox {float(r['AvgProx']):.1f} ft" if int(r["Attempts"]) else "0/0 • 0.0%", axis=1)
+    out["Bucket"] = pd.Categorical(out["Bucket"].astype(str), categories=APPROACH_BUCKET_ORDER, ordered=True)
+    return out.sort_values("Bucket").reset_index(drop=True)[["Bucket", "Attempts", "Made", "Pct", "Label", "AvgProx"]]
+
+
+def _approach_summary_for_chart(summary_df, series_label, metric="gir"):
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(columns=["Bucket", "Series", "Rate", "Attempts", "Count", "Label"])
+
+    d = summary_df.copy()
+    d = d[d["Bucket"].notna()].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Bucket", "Series", "Rate", "Attempts", "Count", "Label"])
+
+    d["Bucket"] = d["Bucket"].astype(str)
+    d["Attempts"] = pd.to_numeric(d.get("Attempts", 0), errors="coerce").fillna(0).astype(int)
+    d["Made"] = pd.to_numeric(d.get("Made", 0), errors="coerce").fillna(0).astype(int)
+    d["Pct"] = pd.to_numeric(d.get("Pct", 0), errors="coerce").fillna(0.0)
+    d["AvgProx"] = pd.to_numeric(d.get("AvgProx", 0), errors="coerce").fillna(0.0)
+
+    if metric == "prox":
+        d["Rate"] = d["AvgProx"]
+        d["Count"] = d["Attempts"]
+        d["Label"] = d.apply(lambda r: f"{float(r['AvgProx']):.1f} ft • {int(r['Attempts'])} shots" if int(r["Attempts"]) else "—", axis=1)
+    else:
+        d["Rate"] = d["Pct"]
+        d["Count"] = d["Made"]
+        d["Label"] = d.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {float(r['Pct']):.1f}%" if int(r["Attempts"]) else "0/0 • 0.0%", axis=1)
+
+    d["Series"] = series_label
+    return d[["Bucket", "Series", "Rate", "Attempts", "Count", "Label"]]
+
+
+def render_approach_distance_player_compare(
+    round_summary,
+    baseline_summary,
+    bucket_order,
+    compare_label="Baseline",
+    overlay_summaries=None,
+    show_round=True,
+    show_baseline=True,
+    title="Approach Distance Control — Player Comparison",
+):
+    """
+    Analysis-tab player comparison:
+    - GIR % by approach distance bucket
+    - average proximity by approach distance bucket
+    - optional selected-round line
+    - optional selected baseline line
+    - multiple player overlays
+    """
+    overlay_summaries = overlay_summaries or []
+
+    series_defs = []
+    if show_round and round_summary is not None and not round_summary.empty:
+        series_defs.append(("This Round", round_summary.copy()))
+    if show_baseline and baseline_summary is not None and not baseline_summary.empty:
+        series_defs.append((compare_label, baseline_summary.copy()))
+    for label, summary in overlay_summaries:
+        if label and summary is not None and not summary.empty:
+            series_defs.append((str(label), summary.copy()))
+
+    st.markdown(f"#### {title}")
+    st.caption("Lines show approach performance by distance bucket. Hide the selected round for a cleaner player-vs-player view.")
+
+    if not series_defs:
+        st.info("No usable approach distance data found for this comparison.")
+        return
+
+    def _build_long(metric):
+        frames = [_approach_summary_for_chart(summary, label, metric=metric) for label, summary in series_defs]
+        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if out.empty:
+            return out
+        out = out[out["Bucket"].notna()].copy()
+        out["Bucket"] = pd.Categorical(out["Bucket"].astype(str), categories=bucket_order, ordered=True)
+        return out.sort_values(["Bucket", "Series"]).copy()
+
+    def _render_line(plot_df, metric_title, y_title, height=300, pct_axis=True):
+        if plot_df is None or plot_df.empty:
+            st.info(f"No usable {metric_title.lower()} data found.")
+            return
+        y_encoding = alt.Y("Rate:Q", title=y_title, scale=alt.Scale(domain=[0, 100])) if pct_axis else alt.Y("Rate:Q", title=y_title)
+        chart = (
+            alt.Chart(plot_df)
+            .mark_line(point=True, strokeWidth=3)
+            .encode(
+                x=alt.X("Bucket:N", sort=bucket_order, title="Approach Distance"),
+                y=y_encoding,
+                color=alt.Color("Series:N", title=None, legend=alt.Legend(orient="top")),
+                tooltip=[
+                    alt.Tooltip("Bucket:N", title="Distance"),
+                    alt.Tooltip("Series:N", title="Series"),
+                    alt.Tooltip("Count:Q", title="Made / Shots", format=",.0f"),
+                    alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
+                    alt.Tooltip("Rate:Q", title=y_title, format=".1f"),
+                    alt.Tooltip("Label:N", title="Summary"),
+                ],
+            )
+            .properties(height=height, title=metric_title)
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor="white",
+                titleColor="white",
+                gridColor="rgba(255,255,255,0.10)",
+                tickColor="rgba(255,255,255,0.20)",
+                domainColor="rgba(255,255,255,0.20)",
+            )
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+    gir_long = _build_long("gir")
+    prox_long = _build_long("prox")
+    _render_line(gir_long, "Approach GIR % by Distance", "GIR %", height=320, pct_axis=True)
+    _render_line(prox_long, "Average Proximity by Distance", "Avg Proximity (ft)", height=290, pct_axis=False)
+
+    table = pd.DataFrame({"Bucket": bucket_order})
+    for label, summary in series_defs:
+        block = summary[["Bucket", "Attempts", "Made", "Pct", "AvgProx"]].copy()
+        block["Bucket"] = block["Bucket"].astype(str)
+        block = block.rename(columns={
+            "Attempts": f"{label} Attempts",
+            "Made": f"{label} GIR Made",
+            "Pct": f"{label} GIR %",
+            "AvgProx": f"{label} Avg Prox",
+        })
+        table = table.merge(block, on="Bucket", how="left")
+
+    table["Bucket"] = pd.Categorical(table["Bucket"].astype(str), categories=bucket_order, ordered=True)
+    table = table.sort_values("Bucket").reset_index(drop=True)
+    for col in table.columns:
+        if col != "Bucket":
+            table[col] = pd.to_numeric(table[col], errors="coerce")
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+
+def summarize_approach_club_for_chart(frame, min_attempts=1):
+    """
+    Club approach summary for player-comparison charts.
+    Works on raw hole data or already-prepared approach frames.
+    """
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    if "Approach Club" in frame.columns and "Approach GIR Flag" in frame.columns:
+        d = frame.copy()
+    else:
+        d = prepare_approach_frame(frame)
+
+    if d.empty or "Approach Club" not in d.columns:
+        return pd.DataFrame(columns=["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    d = d[d["Approach Club"].astype(str).str.strip() != ""].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    out = (
+        d.groupby("Approach Club", as_index=False)
+         .agg(
+             Attempts=("Approach GIR Flag", "size"),
+             Made=("Approach GIR Flag", "sum"),
+             AvgProx=("Approach Proximity", "mean"),
+         )
+         .rename(columns={"Approach Club": "Club"})
+    )
+    out = out[pd.to_numeric(out["Attempts"], errors="coerce").fillna(0) >= int(min_attempts)].copy()
+    if out.empty:
+        return pd.DataFrame(columns=["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"])
+
+    out["Pct"] = (
+        pd.to_numeric(out["Made"], errors="coerce").fillna(0)
+        / pd.to_numeric(out["Attempts"], errors="coerce").replace(0, pd.NA)
+        * 100
+    ).fillna(0).round(1)
+    out["Label"] = out.apply(
+        lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {float(r['Pct']):.1f}%",
+        axis=1,
+    )
+    out["_sort"] = out["Club"].astype(str).apply(_club_sort_key) if "_club_sort_key" in globals() else out["Club"].astype(str)
+    return out.sort_values(["_sort", "Club"]).drop(columns=["_sort"], errors="ignore").reset_index(drop=True)[["Club", "Attempts", "Made", "Pct", "Label", "AvgProx"]]
+
+
+def _approach_category_summary_for_chart(summary_df, series_label, category_col):
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(columns=[category_col, "Series", "GIRPct", "Attempts", "Made", "AvgProx", "Label"])
+
+    d = summary_df.copy()
+    if category_col not in d.columns:
+        return pd.DataFrame(columns=[category_col, "Series", "GIRPct", "Attempts", "Made", "AvgProx", "Label"])
+
+    d = d[d[category_col].notna()].copy()
+    if d.empty:
+        return pd.DataFrame(columns=[category_col, "Series", "GIRPct", "Attempts", "Made", "AvgProx", "Label"])
+
+    d[category_col] = d[category_col].astype(str)
+    d["Attempts"] = pd.to_numeric(d.get("Attempts", 0), errors="coerce").fillna(0).astype(int)
+    d["Made"] = pd.to_numeric(d.get("Made", 0), errors="coerce").fillna(0).astype(int)
+    d["GIRPct"] = pd.to_numeric(d.get("Pct", 0), errors="coerce").fillna(0.0)
+    d["AvgProx"] = pd.to_numeric(d.get("AvgProx", 0), errors="coerce").fillna(0.0)
+    d["Series"] = series_label
+    d["Label"] = d.apply(
+        lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} • {float(r['GIRPct']):.1f}%" if int(r["Attempts"]) else "0/0 • 0.0%",
+        axis=1,
+    )
+    return d[[category_col, "Series", "GIRPct", "Attempts", "Made", "AvgProx", "Label"]]
+
+
+def render_approach_gir_player_compare_bars(
+    distance_series_defs,
+    club_series_defs,
+    bucket_order,
+    min_attempts=3,
+    max_clubs=14,
+):
+    """
+    Player-comparison bar charts for:
+    - GIR % by yardage bucket
+    - GIR % by approach club
+
+    This is intentionally separate from the round-review approach charts so it can be
+    used as a clean player-vs-player comparison, like the putting section.
+    """
+    st.markdown("#### Player Compare — GIR % by Yardage and Club")
+    st.caption("Grouped bars compare GIR % between selected players. Tooltips include makes, attempts, and average proximity so sample size is visible.")
+
+    # ---------- Yardage range chart ----------
+    dist_frames = []
+    for label, summary in distance_series_defs:
+        if label and summary is not None and not summary.empty:
+            block = summary.copy()
+            block = block[pd.to_numeric(block.get("Attempts", 0), errors="coerce").fillna(0) >= int(min_attempts)].copy()
+            dist_frames.append(_approach_category_summary_for_chart(block, label, "Bucket"))
+
+    dist_long = pd.concat(dist_frames, ignore_index=True) if dist_frames else pd.DataFrame()
+    if not dist_long.empty:
+        dist_long["Bucket"] = pd.Categorical(dist_long["Bucket"].astype(str), categories=bucket_order, ordered=True)
+        dist_long = dist_long.sort_values(["Bucket", "Series"]).copy()
+        dist_present = [b for b in bucket_order if b in dist_long["Bucket"].astype(str).unique().tolist()]
+
+        dist_chart = (
+            alt.Chart(dist_long)
+            .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
+            .encode(
+                x=alt.X("Bucket:N", sort=dist_present, title="Yardage Range"),
+                y=alt.Y("GIRPct:Q", title="GIR %", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("Series:N", title=None, legend=alt.Legend(orient="top")),
+                xOffset=alt.XOffset("Series:N"),
+                tooltip=[
+                    alt.Tooltip("Bucket:N", title="Yardage"),
+                    alt.Tooltip("Series:N", title="Player / Series"),
+                    alt.Tooltip("Made:Q", title="GIR Made", format=",.0f"),
+                    alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
+                    alt.Tooltip("GIRPct:Q", title="GIR %", format=".1f"),
+                    alt.Tooltip("AvgProx:Q", title="Avg Prox", format=".1f"),
+                    alt.Tooltip("Label:N", title="Summary"),
+                ],
+            )
+            .properties(height=360, title="GIR % by Yardage Range — Player Compare")
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor="white",
+                titleColor="white",
+                gridColor="rgba(255,255,255,0.10)",
+                tickColor="rgba(255,255,255,0.20)",
+                domainColor="rgba(255,255,255,0.20)",
+            )
+        )
+        st.altair_chart(dist_chart, use_container_width=True)
+
+        dist_table = dist_long.rename(columns={"Bucket": "Yardage", "GIRPct": "GIR %", "AvgProx": "Avg Prox"})[
+            ["Yardage", "Series", "Attempts", "Made", "GIR %", "Avg Prox"]
+        ]
+        _render_golf_dataframe(dist_table, use_container_width=True, hide_index=True)
+
+        dist_matrix = dist_long.copy()
+        dist_matrix["Summary"] = dist_matrix.apply(
+            lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} ({float(r['GIRPct']):.1f}%) | Prox {float(r['AvgProx']):.1f} ft",
+            axis=1,
+        )
+        dist_pivot = (
+            dist_matrix.pivot_table(index="Bucket", columns="Series", values="Summary", aggfunc="first")
+            .reset_index()
+            .rename(columns={"Bucket": "Yardage"})
+        )
+        dist_pivot["Yardage"] = pd.Categorical(dist_pivot["Yardage"].astype(str), categories=bucket_order, ordered=True)
+        dist_pivot = dist_pivot.sort_values("Yardage").reset_index(drop=True)
+        st.markdown("##### Yardage Summary Matrix")
+        st.caption("Each cell shows GIR made/attempts, GIR %, and average proximity. Buckets stay detailed so the comparison does not get too general.")
+        st.dataframe(dist_pivot, use_container_width=True, hide_index=True)
+    else:
+        st.info("No yardage buckets qualify for the player comparison with the current minimum attempts.")
+
+    # ---------- Club chart ----------
+    club_frames = []
+    for label, summary in club_series_defs:
+        if label and summary is not None and not summary.empty:
+            block = summary.copy()
+            block = block[pd.to_numeric(block.get("Attempts", 0), errors="coerce").fillna(0) >= int(min_attempts)].copy()
+            club_frames.append(_approach_category_summary_for_chart(block, label, "Club"))
+
+    club_long = pd.concat(club_frames, ignore_index=True) if club_frames else pd.DataFrame()
+    if not club_long.empty:
+        club_totals = (
+            club_long.groupby("Club", as_index=False)["Attempts"]
+            .sum()
+            .sort_values(["Attempts", "Club"], ascending=[False, True])
+        )
+        club_order = club_totals["Club"].head(int(max_clubs)).tolist()
+        club_long = club_long[club_long["Club"].isin(club_order)].copy()
+        club_order = sorted(club_order, key=_club_sort_key) if "_club_sort_key" in globals() else club_order
+
+        club_chart = (
+            alt.Chart(club_long)
+            .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5)
+            .encode(
+                x=alt.X("Club:N", sort=club_order, title="Club"),
+                y=alt.Y("GIRPct:Q", title="GIR %", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("Series:N", title=None, legend=alt.Legend(orient="top")),
+                xOffset=alt.XOffset("Series:N"),
+                tooltip=[
+                    alt.Tooltip("Club:N", title="Club"),
+                    alt.Tooltip("Series:N", title="Player / Series"),
+                    alt.Tooltip("Made:Q", title="GIR Made", format=",.0f"),
+                    alt.Tooltip("Attempts:Q", title="Attempts", format=",.0f"),
+                    alt.Tooltip("GIRPct:Q", title="GIR %", format=".1f"),
+                    alt.Tooltip("AvgProx:Q", title="Avg Prox", format=".1f"),
+                    alt.Tooltip("Label:N", title="Summary"),
+                ],
+            )
+            .properties(height=360, title="GIR % by Club — Player Compare")
+            .configure_view(strokeOpacity=0)
+            .configure_axis(
+                labelColor="white",
+                titleColor="white",
+                gridColor="rgba(255,255,255,0.10)",
+                tickColor="rgba(255,255,255,0.20)",
+                domainColor="rgba(255,255,255,0.20)",
+            )
+        )
+        st.altair_chart(club_chart, use_container_width=True)
+
+        club_table = club_long.rename(columns={"GIRPct": "GIR %", "AvgProx": "Avg Prox"})[
+            ["Club", "Series", "Attempts", "Made", "GIR %", "Avg Prox"]
+        ]
+        _render_golf_dataframe(club_table, use_container_width=True, hide_index=True)
+
+        club_matrix = club_long.copy()
+        club_matrix["Summary"] = club_matrix.apply(
+            lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} ({float(r['GIRPct']):.1f}%) | Prox {float(r['AvgProx']):.1f} ft",
+            axis=1,
+        )
+        club_pivot = (
+            club_matrix.pivot_table(index="Club", columns="Series", values="Summary", aggfunc="first")
+            .reset_index()
+        )
+        club_pivot["_sort"] = club_pivot["Club"].astype(str).apply(_club_sort_key) if "_club_sort_key" in globals() else range(len(club_pivot))
+        club_pivot = club_pivot.sort_values(["_sort", "Club"]).drop(columns=["_sort"], errors="ignore").reset_index(drop=True)
+        st.markdown("##### Club Summary Matrix")
+        st.caption("Each cell shows GIR made/attempts, GIR %, and average proximity for that club.")
+        st.dataframe(club_pivot, use_container_width=True, hide_index=True)
+    else:
+        st.info("No clubs qualify for the player comparison with the current minimum attempts.")
 
 def build_overview_snapshot(frame):
     d = frame.copy()
@@ -6396,263 +6988,147 @@ with tab_compare:
 
 
 with tab_analysis:
-    st.markdown("### 🎯 Approach Breakdown")
-    st.info("For deeper filters, shot-pattern exploration, GIR-only splits, Best Clubs, and Best Yardage Windows, jump over to the Analysis tab.")
-    compare_mode = st.radio("Compare this round against:", _compare_mode_options(), horizontal=True, key="approach_compare_mode")
-    benchmark_df = build_benchmark_df(df, round_data, compare_mode, selected_baseline_round_ids)
-    if compare_mode == "Selected Rounds" and not selected_baseline_round_ids:
-        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
-
-    round_approach = prepare_approach_frame(round_data)
-    bench_approach = prepare_approach_frame(benchmark_df)
-
-    round_attempts = int(len(round_approach))
-    round_gir_made = int(round_approach["Approach GIR Flag"].sum()) if not round_approach.empty else 0
-    round_gir_pct = (round_gir_made / round_attempts * 100) if round_attempts else 0.0
-    bench_attempts = int(len(bench_approach))
-    bench_gir_made = int(bench_approach["Approach GIR Flag"].sum()) if not bench_approach.empty else 0
-    bench_gir_pct = (bench_gir_made / bench_attempts * 100) if bench_attempts else 0.0
-
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Round Approach Attempts", round_attempts)
-    with k2:
-        st.metric("Round Approach GIR", f"{round_gir_made}/{round_attempts}", f"{round_gir_pct:.1f}%")
-    with k3:
-        st.metric(f"{compare_mode} Attempts", bench_attempts)
-    with k4:
-        st.metric(f"{compare_mode} GIR", f"{bench_gir_made}/{bench_attempts}", f"{bench_gir_pct:.1f}%")
-
-    round_us_open = build_us_open_par_summary(round_data)
-    bench_us_open = build_us_open_par_summary(benchmark_df)
-
-    k5 = st.columns(1)[0]
-    with k5:
-        st.metric(
-            "US Open Pars",
-            f'{round_us_open["made"]}/{round_us_open["attempts"]} ({round_us_open["pct"]:.1f}%)',
-            f'{round_us_open["pct"] - bench_us_open["pct"]:+.1f}% vs {compare_mode}'
-        )
-
-    st.markdown("#### Approach GIR by Distance Bucket")
-    round_dist = summarize_approach_by_bucket(round_data)
-    bench_dist = summarize_approach_by_bucket(benchmark_df)
-
-    dist_long = build_compare_long(round_dist, bench_dist, "Bucket", round_label="Round", bench_label=compare_mode)
-    if not dist_long.empty:
-        render_paired_compare_bars(dist_long, "Bucket", APPROACH_BUCKET_ORDER, compare_mode, "Distance Bucket", "GIR %")
-
-        dist_table = pd.merge(
-            round_dist.rename(columns={"Attempts":"Round Attempts","Made":"Round Made","Pct":"Round %","AvgProx":"Round Avg Prox"}),
-            bench_dist.rename(columns={"Attempts":f"{compare_mode} Attempts","Made":f"{compare_mode} Made","Pct":f"{compare_mode} %","AvgProx":f"{compare_mode} Avg Prox"}),
-            on="Bucket",
-            how="outer",
-        ).sort_values("Bucket")
-        st.dataframe(dist_table, use_container_width=True, hide_index=True)
-
-        insights = build_approach_insights(round_dist, bench_dist, summarize_approach_by_club(round_data, min_attempts=1))
-        if insights:
-            insight_html = "<br>".join(insights)
-            st.markdown(
-                f"""
-                <div style="margin-top:8px; padding:10px 12px; background:#242424; border-radius:10px; line-height:1.55;">
-                  <b>💡 Approach Insights</b><br>
-                  {insight_html}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.info("No usable distance bucket data found for this round / comparison group.")
-
-    st.markdown("#### Approach Proximity Ranges")
-    prox_inside_df = build_approach_inside_proximity_summary(round_data, benchmark_df)
-    if not prox_inside_df.empty:
-        prox_long = pd.DataFrame({
-            "Bucket": list(prox_inside_df["Bucket"].astype(str)) * 2,
-            "Series": ["Round"] * len(prox_inside_df) + [compare_mode] * len(prox_inside_df),
-            "Made": list(pd.to_numeric(prox_inside_df["Round Inside"], errors="coerce").fillna(0).astype(int))
-                    + list(pd.to_numeric(prox_inside_df["Baseline Inside"], errors="coerce").fillna(0).astype(int)),
-            "Attempts": list(pd.to_numeric(prox_inside_df["Round Opportunities"], errors="coerce").fillna(0).astype(int))
-                        + list(pd.to_numeric(prox_inside_df["Baseline Opportunities"], errors="coerce").fillna(0).astype(int)),
-            "Pct": list(pd.to_numeric(prox_inside_df["Round %"], errors="coerce").fillna(0.0))
-                   + list(pd.to_numeric(prox_inside_df["Baseline %"], errors="coerce").fillna(0.0)),
-            "Label": list(prox_inside_df["DisplayLabel"])
-                     + [
-                        f"{_safe_int_scalar(r.get('Baseline Inside', 0))}/{_safe_int_scalar(r.get('Baseline Opportunities', 0))} {_safe_float_scalar(r.get('Baseline %', 0)):.0f}%"
-                        for _, r in prox_inside_df.iterrows()
-                     ],
-        })
-        render_paired_compare_bars(prox_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode, "Proximity Bucket", "Approach-Inside %")
-        st.dataframe(prox_inside_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No approach proximity-range data found for this round / comparison group.")
-
-    st.markdown("#### Distance Performance Curve")
-    round_curve = build_distance_performance_curve(round_data)
-    bench_curve = build_distance_performance_curve(benchmark_df)
-    render_distance_performance_curve(round_curve, bench_curve, compare_label=compare_mode)
-
-    if not round_curve.empty:
-        curve_table = round_curve.rename(columns={
-            "Attempts": "Round Attempts",
-            "Made": "Round Made",
-            "Pct": "Round GIR %",
-            "AvgProx": "Round Avg Prox",
-            "ToParPerHole": "Round To Par / Hole",
-        })
-        st.dataframe(curve_table, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Distance SG Heatmap")
-        dist_sg_df = build_distance_sg_table(round_curve, bench_curve)
-        if not dist_sg_df.empty:
-            dist_sg_df["Metric"] = "Approach SG"
-            render_distance_sg_heatmap(dist_sg_df.copy())
-            st.dataframe(dist_sg_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No distance SG-style data available.")
-
-        st.markdown("#### Distance Improvement Tracker")
-        improvement_df = build_distance_improvement_tracker(df, round_data)
-        if not improvement_df.empty:
-            st.dataframe(improvement_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No distance improvement tracker data available.")
-
-
-    st.markdown("#### Distance × Club Matrix")
-    render_distance_club_compare_matrix(round_data, benchmark_df, compare_label=compare_mode, min_attempts=1)
-
-    st.markdown("#### Approach GIR by Club")
-    min_club_attempts = st.slider("Minimum attempts for club chart (applies to round and comparison display)", 1, 10, 1, 1)
-    round_club = summarize_approach_by_club(round_data, min_attempts=1)
-    bench_club = summarize_approach_by_club(benchmark_df, min_attempts=1)
-
-    club_keys = sorted(set(round_club["Club"].tolist()) | set(bench_club["Club"].tolist()))
-    if club_keys:
-        merged_counts = pd.merge(
-            round_club[["Club", "Attempts"]],
-            bench_club[["Club", "Attempts"]],
-            on="Club",
-            how="outer",
-            suffixes=("_Round", "_Bench")
-        ).fillna(0)
-        keep_clubs = merged_counts[(merged_counts["Attempts_Round"] >= min_club_attempts) | (merged_counts["Attempts_Bench"] >= min_club_attempts)]["Club"].tolist()
-        round_club = round_club[round_club["Club"].isin(keep_clubs)].copy()
-        bench_club = bench_club[bench_club["Club"].isin(keep_clubs)].copy()
-
-    club_long = build_compare_long(round_club, bench_club, "Club", round_label="Round", bench_label=compare_mode)
-    if not club_long.empty:
-        # Only keep clubs actually used in the selected round for the chart + table
-        round_used_clubs = round_club["Club"].dropna().astype(str).tolist()
-        club_long = club_long[club_long["Club"].astype(str).isin(round_used_clubs)].copy()
-
-        if not club_long.empty:
-            club_order = (
-                round_club[round_club["Club"].astype(str).isin(round_used_clubs)]
-                .sort_values(["Attempts", "Pct", "Club"], ascending=[False, False, True])["Club"]
-                .astype(str)
-                .tolist()
-            )
-            render_paired_compare_bars(club_long, "Club", club_order, compare_mode, "Club", "GIR %")
-
-        club_table = pd.merge(
-            round_club.rename(columns={"Attempts": "Round Attempts", "Made": "Round Made", "Pct": "Round GIR %", "AvgProx": "Round Avg Prox"}),
-            bench_club.rename(columns={"Attempts": f"{compare_mode} Attempts", "Made": f"{compare_mode} Made", "Pct": f"{compare_mode} GIR %", "AvgProx": f"{compare_mode} Avg Prox"}),
-            on="Club",
-            how="left"
-        )
-        club_table = club_table[club_table["Club"].astype(str).isin(round_used_clubs)].copy()
-        club_table["_club_sort"] = club_table["Club"].astype(str).apply(_club_sort_key)
-        st.dataframe(club_table.sort_values(["_club_sort", "Round Attempts"], ascending=[True, False]).drop(columns=["_club_sort"]), use_container_width=True, hide_index=True)
-
-        st.markdown("#### Club Performance Curve")
-        render_club_performance_curve(round_club, bench_club, compare_label=compare_mode)
-
-        st.markdown("#### Club Performance Ranking")
-        club_rank = build_club_rank_table(round_club, bench_club)
-        club_rank = club_rank[club_rank["Club"].astype(str).isin(round_used_clubs)].copy()
-        st.dataframe(club_rank, use_container_width=True, hide_index=True)
-    else:
-        st.info("No usable approach club data found for this round / comparison group.")
-
-    st.markdown("#### Approach Miss Direction")
-    round_dir = summarize_approach_miss_direction(round_data)
-    bench_dir = summarize_approach_miss_direction(benchmark_df)
-    if not round_dir.empty or not bench_dir.empty:
-        dir_order = (
-            pd.concat([round_dir[["Direction", "Count"]], bench_dir[["Direction", "Count"]]], ignore_index=True)
-            .groupby("Direction", as_index=False)["Count"]
-            .sum()
-            .sort_values(["Count", "Direction"], ascending=[False, True])["Direction"]
-            .tolist()
-        )
-
-        render_paired_compare_counts(round_dir, bench_dir, "Direction", dir_order, compare_mode, "Direction", "Count")
-
-        dir_table = pd.merge(
-            round_dir.rename(columns={"Count": "Round Count", "Pct": "Round %"}),
-            bench_dir.rename(columns={"Count": f"{compare_mode} Count", "Pct": f"{compare_mode} %"}),
-            on="Direction",
-            how="outer"
-        ).sort_values("Direction")
-        st.dataframe(dir_table, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Miss Bias vs Baseline")
-        miss_insights, miss_compare_df, miss_round_bias, miss_bench_bias = build_miss_direction_diagnosis(round_dir, bench_dir)
-        render_miss_direction_bias_cards(miss_compare_df)
-        st.dataframe(miss_compare_df, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Grouped Miss Families")
-        grouped_miss_df = build_grouped_miss_profile(miss_round_bias, miss_bench_bias, compare_mode)
-        render_grouped_miss_profile(grouped_miss_df, compare_mode)
-
-        st.markdown("#### Miss Diagnosis")
-        for line in miss_insights:
-            st.markdown(f"- {line}")
-        st.caption("Left = Short Left + Left + Long Left. Right = Short Right + Right + Long Right. Short = Short Left + Short + Short Right. Long = Long Left + Long + Long Right.")
-    else:
-        st.info("No approach miss direction data found.")
-
-    st.markdown("#### Approach Miss Heat Map")
-    render_direction_heatmap(round_dir)
-
-    st.markdown("#### Distance Performance Ranking")
-    rank_df = build_distance_rank_table(round_dist, bench_dist)
-    if not rank_df.empty:
-        st.dataframe(rank_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No distance ranking rows available.")
-
-    st.markdown("#### Distance vs Club Heatmap")
-    render_distance_club_heatmap(round_data, title="Round Distance vs Club Heatmap")
-
-    st.markdown("#### Analysis Tools Moved")
-    st.caption("The deeper filter tools and shot-pattern exploration now live in the Analysis tab so this Approach tab stays focused on round review.")
-
-    approach_debug = prepare_approach_frame(round_data).copy()
-    if not approach_debug.empty:
-        approach_debug = approach_debug.sort_values("Hole")[[
-            "Hole", "Approach Club", "Approach Distance", "Approach Bucket",
-            "Approach GIR Flag", "Approach Miss Direction Clean", "Approach Proximity"
-        ]].rename(columns={
-            "Approach Club": "Club",
-            "Approach Distance": "Distance",
-            "Approach Bucket": "Bucket",
-            "Approach GIR Flag": "Approach GIR",
-            "Approach Miss Direction Clean": "Miss Dir",
-            "Approach Proximity": "Prox"
-        })
-    render_debug_section("🔎 Debug: Approach rows used in calculations", approach_debug)
-
-
-with tab_analysis:
-    st.markdown("### 📊 Analysis")
-    st.caption("Deeper filtering and pattern-finding for approach play, including GIR-only views, best clubs, and best yardage windows.")
+    st.markdown("### 🎯 Ball Striking")
+    st.caption("Cleaned-up approach analysis: player comparisons first, deeper filter tools below.")
 
     analysis_base_player_df = df[df["Player Name"] == player].copy() if "Player Name" in df else df.copy()
 
-    st.markdown("#### Analysis Filter View (Club / Yardage / Course)")
+    st.markdown("#### Player Compare — Approach by Distance")
+    ac1, ac2 = st.columns(2)
+    with ac1:
+        show_approach_round_line = st.checkbox("Show selected round line", value=True, key="show_approach_round_line")
+    with ac2:
+        show_approach_baseline_line = st.checkbox("Show baseline line", value=True, key="show_approach_baseline_line")
+
+    approach_player_options = sorted([x for x in df["Player Name"].dropna().unique().tolist() if str(x).strip() != ""]) if "Player Name" in df.columns else []
+    default_approach_compare_players = [player] if str(player) in [str(x) for x in approach_player_options] else []
+    selected_approach_compare_players = st.multiselect(
+        "Compare player approach profiles",
+        options=approach_player_options,
+        default=default_approach_compare_players,
+        key="selected_approach_compare_players",
+        help="Select 1–4 players. Uncheck 'Show selected round line' for a cleaner player-vs-player view.",
+    )
+    if len(selected_approach_compare_players) > 4:
+        st.warning("Showing the first 4 comparison players to keep the approach charts readable.")
+        selected_approach_compare_players = selected_approach_compare_players[:4]
+
+    compare_mode_analysis = st.radio("Approach baseline:", _compare_mode_options(), horizontal=True, key="analysis_compare_mode")
+    compare_label_analysis = _compare_mode_display_label(compare_mode_analysis)
+    benchmark_df_analysis = build_benchmark_df(df, round_data, compare_mode_analysis, selected_baseline_round_ids)
+    if compare_mode_analysis == "Selected Rounds" and not selected_baseline_round_ids:
+        st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
+
+    st.markdown("#### Player Compare Filters")
+    fpc1, fpc2, fpc3, fpc4 = st.columns(4)
+    with fpc1:
+        analysis_compare_par_filter = st.selectbox(
+            "Par filter",
+            ["All", "Par 3", "Par 4", "Par 5"],
+            index=0,
+            key="analysis_compare_par_filter",
+        )
+    with fpc2:
+        fairway_disabled = analysis_compare_par_filter == "Par 3"
+        analysis_compare_fairway_filter = st.selectbox(
+            "Fairway filter",
+            ["All", "Fairway Yes", "Fairway No"],
+            index=0,
+            key="analysis_compare_fairway_filter",
+            disabled=fairway_disabled,
+            help="Fairway filter is ignored for Par 3s.",
+        )
+    with fpc3:
+        approach_compare_min_attempts = st.slider(
+            "Minimum attempts",
+            1, 20, 3, 1,
+            key="analysis_player_compare_min_attempts",
+        )
+    with fpc4:
+        approach_compare_max_clubs = st.slider(
+            "Max clubs to show",
+            4, 20, 12, 1,
+            key="analysis_player_compare_max_clubs",
+        )
+
+    analysis_compare_par_vals = None
+    if analysis_compare_par_filter == "Par 3":
+        analysis_compare_par_vals = [3]
+    elif analysis_compare_par_filter == "Par 4":
+        analysis_compare_par_vals = [4]
+    elif analysis_compare_par_filter == "Par 5":
+        analysis_compare_par_vals = [5]
+
+    analysis_compare_fairway_vals = None
+    if analysis_compare_par_filter != "Par 3":
+        if analysis_compare_fairway_filter == "Fairway Yes":
+            analysis_compare_fairway_vals = [1]
+            if analysis_compare_par_vals is None:
+                analysis_compare_par_vals = [4, 5]
+        elif analysis_compare_fairway_filter == "Fairway No":
+            analysis_compare_fairway_vals = [0]
+            if analysis_compare_par_vals is None:
+                analysis_compare_par_vals = [4, 5]
+
+    if analysis_compare_par_filter == "Par 3":
+        st.caption("Par 3 selected: fairway filter is ignored because Par 3s do not have fairway attempts.")
+    elif analysis_compare_fairway_filter != "All" and analysis_compare_par_filter == "All":
+        st.caption("Fairway filter selected: comparison is limited to Par 4 and Par 5 approach shots.")
+
+    def _analysis_compare_filtered_frame(frame):
+        return apply_approach_filters(
+            frame,
+            par_vals=analysis_compare_par_vals,
+            fairway_vals=analysis_compare_fairway_vals,
+        )
+
+    round_analysis_compare_frame = _analysis_compare_filtered_frame(round_data)
+    baseline_analysis_compare_frame = _analysis_compare_filtered_frame(benchmark_df_analysis)
+
+    approach_overlay_summaries = []
+    for compare_player in selected_approach_compare_players:
+        player_frame = df[df["Player Name"] == compare_player].copy() if "Player Name" in df.columns else pd.DataFrame()
+        player_filtered_frame = _analysis_compare_filtered_frame(player_frame)
+        approach_overlay_summaries.append((str(compare_player), summarize_approach_bucket_for_chart(player_filtered_frame)))
+
+    round_approach_distance_summary = summarize_approach_bucket_for_chart(round_analysis_compare_frame)
+    baseline_approach_distance_summary = summarize_approach_bucket_for_chart(baseline_analysis_compare_frame)
+
+    render_approach_distance_player_compare(
+        round_approach_distance_summary,
+        baseline_approach_distance_summary,
+        APPROACH_BUCKET_ORDER,
+        compare_label=compare_label_analysis,
+        overlay_summaries=approach_overlay_summaries,
+        show_round=show_approach_round_line,
+        show_baseline=show_approach_baseline_line,
+        title="Approach Distance Control — Player Comparison",
+    )
+
+    st.markdown("#### Player Compare — GIR % Charts")
+    approach_distance_series_defs = []
+    approach_club_series_defs = []
+    if show_approach_round_line:
+        approach_distance_series_defs.append(("This Round", round_approach_distance_summary))
+        approach_club_series_defs.append(("This Round", summarize_approach_club_for_chart(round_analysis_compare_frame, min_attempts=1)))
+    if show_approach_baseline_line:
+        approach_distance_series_defs.append((compare_label_analysis, baseline_approach_distance_summary))
+        approach_club_series_defs.append((compare_label_analysis, summarize_approach_club_for_chart(baseline_analysis_compare_frame, min_attempts=1)))
+    for compare_player in selected_approach_compare_players:
+        player_frame = df[df["Player Name"] == compare_player].copy() if "Player Name" in df.columns else pd.DataFrame()
+        player_filtered_frame = _analysis_compare_filtered_frame(player_frame)
+        approach_distance_series_defs.append((str(compare_player), summarize_approach_bucket_for_chart(player_filtered_frame)))
+        approach_club_series_defs.append((str(compare_player), summarize_approach_club_for_chart(player_filtered_frame, min_attempts=1)))
+
+    render_approach_gir_player_compare_bars(
+        approach_distance_series_defs,
+        approach_club_series_defs,
+        APPROACH_BUCKET_ORDER,
+        min_attempts=approach_compare_min_attempts,
+        max_clubs=approach_compare_max_clubs,
+    )
+
+    st.markdown("#### Ball-Striking Filter View (Club / Yardage / Course)")
     filter_options_base = build_shot_pattern_frame(df, player)
     if not filter_options_base.empty:
         fa1, fa2, fa3 = st.columns(3)
@@ -6686,7 +7162,7 @@ with tab_analysis:
             gir_mode=analysis_gir_mode,
         )
         bench_filter_view = apply_approach_filters(
-            benchmark_df,
+            benchmark_df_analysis,
             yard_buckets=analysis_yards,
             clubs=analysis_clubs,
             courses=analysis_courses,
@@ -6721,7 +7197,7 @@ with tab_analysis:
         if not prox_compare.empty:
             prox_long = pd.DataFrame({
                 "Bucket": list(prox_compare["Bucket"].astype(str)) * 2,
-                "Series": ["Round"] * len(prox_compare) + [compare_mode] * len(prox_compare),
+                "Series": ["Round"] * len(prox_compare) + [compare_label_analysis] * len(prox_compare),
                 "Made": list(pd.to_numeric(prox_compare["Round Made"], errors="coerce").fillna(0).astype(int))
                         + list(pd.to_numeric(prox_compare["Baseline Made"], errors="coerce").fillna(0).astype(int)),
                 "Attempts": list(pd.to_numeric(prox_compare["Round Attempts"], errors="coerce").fillna(0).astype(int))
@@ -6737,7 +7213,7 @@ with tab_analysis:
                 ],
             })
             st.markdown("##### Filtered Proximity Distribution")
-            render_paired_compare_bars(prox_long, "Bucket", PUTT_BUCKET_ORDER, compare_mode, "Proximity Bucket", "Share %")
+            render_paired_compare_bars(prox_long, "Bucket", PUTT_BUCKET_ORDER, compare_label_analysis, "Proximity Bucket", "Share %")
             st.dataframe(prox_compare, use_container_width=True, hide_index=True)
         else:
             st.info("No filtered proximity distribution available.")
@@ -6797,7 +7273,7 @@ with tab_analysis:
             gir_mode=shot_gir_mode,
         )
         bench_shot_view = apply_approach_filters(
-            benchmark_df,
+            benchmark_df_analysis,
             yard_buckets=shot_buckets,
             clubs=shot_clubs,
             courses=shot_courses,
@@ -6837,9 +7313,9 @@ with tab_analysis:
                 bench_shot_summary["Pct"] = (bench_shot_summary["Made"] / bench_shot_summary["Attempts"] * 100).round(1)
                 bench_shot_summary["Label"] = bench_shot_summary.apply(lambda r: f"{int(r['Made'])}/{int(r['Attempts'])} {r['Pct']:.0f}%", axis=1)
 
-            shot_long = build_compare_long(round_shot_summary, bench_shot_summary, "Bucket", round_label="Round", bench_label=compare_mode)
+            shot_long = build_compare_long(round_shot_summary, bench_shot_summary, "Bucket", round_label="Round", bench_label=compare_label_analysis)
             if not shot_long.empty:
-                render_paired_compare_bars(shot_long, "Bucket", APPROACH_BUCKET_ORDER, compare_mode, "Distance Bucket", "GIR %")
+                render_paired_compare_bars(shot_long, "Bucket", APPROACH_BUCKET_ORDER, compare_label_analysis, "Distance Bucket", "GIR %")
             else:
                 st.info("No shot pattern comparison bars available.")
 
@@ -6863,7 +7339,7 @@ with tab_analysis:
     else:
         st.info("No shot pattern data available for this player.")
 
-    render_trivia_block("analysis", "Analysis tab trivia")
+    render_trivia_block("analysis", "Ball Striking tab trivia")
 
 with tab_putting:
     st.markdown("### 🏌️ Putting Breakdown")
@@ -6872,26 +7348,34 @@ with tab_putting:
     if compare_mode_putt == "Selected Rounds" and not selected_baseline_round_ids:
         st.info("Pick one or more rounds in 'Custom Round Baseline' above to activate the Selected Rounds baseline.")
 
-    putt_overlay_mode = st.radio(
-        "Putting chart overlay:",
-        ["None", "This Player (All Data in Current Filters)", "Another Player"],
-        horizontal=True,
-        key="putt_overlay_mode"
+    st.markdown("##### Putting chart display")
+    putt_display_c1, putt_display_c2 = st.columns(2)
+    with putt_display_c1:
+        show_putting_round_line = st.checkbox("Show selected round line", value=True, key="show_putting_round_line")
+    with putt_display_c2:
+        show_putting_baseline_line = st.checkbox("Show baseline line", value=True, key="show_putting_baseline_line")
+
+    putt_player_options = sorted([x for x in df["Player Name"].dropna().unique().tolist() if str(x).strip() != ""]) if "Player Name" in df.columns else []
+    default_putt_compare_players = []
+    if str(player) in [str(x) for x in putt_player_options]:
+        default_putt_compare_players = [player]
+
+    selected_putting_compare_players = st.multiselect(
+        "Compare player putting profiles",
+        options=putt_player_options,
+        default=default_putt_compare_players,
+        key="selected_putting_compare_players",
+        help="Select 1–4 players. Uncheck 'Show selected round line' above for a cleaner player-vs-player view.",
     )
 
-    overlay_player_name = None
-    overlay_label = None
-    overlay_frame = pd.DataFrame()
+    if len(selected_putting_compare_players) > 4:
+        st.warning("Showing the first 4 comparison players to keep the putting charts readable.")
+        selected_putting_compare_players = selected_putting_compare_players[:4]
 
-    if putt_overlay_mode == "This Player (All Data in Current Filters)":
-        overlay_frame = df[df["Player Name"] == player].copy() if "Player Name" in df.columns else pd.DataFrame()
-        overlay_label = f"{player} Overall"
-    elif putt_overlay_mode == "Another Player":
-        player_options = sorted([x for x in df["Player Name"].dropna().unique().tolist() if str(x).strip() != "" and str(x) != str(player)])
-        if player_options:
-            overlay_player_name = st.selectbox("Overlay player", player_options, key="putt_overlay_player")
-            overlay_frame = df[df["Player Name"] == overlay_player_name].copy()
-            overlay_label = overlay_player_name
+    overlay_fingerprint_items = []
+    for compare_player in selected_putting_compare_players:
+        player_frame = df[df["Player Name"] == compare_player].copy() if "Player Name" in df.columns else pd.DataFrame()
+        overlay_fingerprint_items.append((str(compare_player), build_putting_skill_fingerprint(player_frame)))
 
     round_putt = prepare_putting_frame(round_data)
     bench_putt = prepare_putting_frame(benchmark_df_putt)
@@ -6959,9 +7443,21 @@ with tab_putting:
         unsafe_allow_html=True,
     )
 
-    st.markdown("#### Putting Skill Fingerprint")
     fingerprint_df = build_putting_skill_fingerprint(round_data)
     bench_fingerprint_df = build_putting_skill_fingerprint(benchmark_df_putt)
+
+    render_putting_distance_comparison_dashboard(
+        fingerprint_df,
+        bench_fingerprint_df,
+        PUTT_BUCKET_ORDER,
+        compare_label=compare_mode_putt,
+        overlay_fps=overlay_fingerprint_items,
+        show_round=show_putting_round_line,
+        show_baseline=show_putting_baseline_line,
+        title="Putting Distance Control — Player Comparison",
+    )
+
+    st.markdown("#### Putting Skill Fingerprint")
     if not fingerprint_df.empty:
         fingerprint_long = build_compare_long(
             fingerprint_df.rename(columns={"OnePutt": "Made", "MakePct": "Pct", "DisplayLabel": "Label"})[["Bucket", "Attempts", "Made", "Pct", "Label"]],
@@ -6980,7 +7476,7 @@ with tab_putting:
         fp_table["1P Arrow"] = fp_table["Δ 1-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=True, tol=0.25))
         fp_table["Δ 3-Putt %"] = (pd.to_numeric(fp_table["ThreePuttPct"], errors="coerce").fillna(0) - pd.to_numeric(fp_table[f"{compare_mode_putt} 3-Putt %"], errors="coerce").fillna(0)).round(1)
         fp_table["3P Arrow"] = fp_table["Δ 3-Putt %"].apply(lambda x: _delta_arrow(x, higher_better=False, tol=0.25))
-        st.dataframe(
+        _render_golf_dataframe(
             fp_table.rename(columns={
                 "OnePutt": "1-Putts",
                 "TwoPutt": "2-Putts",
@@ -7115,20 +7611,6 @@ with tab_putting:
             "Putts Clean": "Putts"
         })
     render_debug_section("🔎 Debug: Putting rows used in calculations", putting_debug)
-
-    st.markdown("#### Overlay — Putting Make % by Distance")
-    round_putt_bucket = summarize_putting_by_bucket(round_data)
-    render_putting_distance_line_chart(round_putt_bucket, PUTT_BUCKET_ORDER, title="Attempts by Distance + Make %", value_col="Pct", made_col="Made", attempts_col="Attempts", value_label="Make %", good_metric=True)
-    if putt_overlay_mode != "None" and overlay_label:
-        overlay_make_df = summarize_putting_by_bucket(overlay_frame)
-        render_putting_overlay_line_chart(round_putt_bucket, overlay_make_df, PUTT_BUCKET_ORDER, title="Make % Overlay", value_col="Pct", primary_name="This Round", overlay_name=overlay_label)
-
-    st.markdown("#### Overlay — 3-Putt % by Distance")
-    three_putt_bucket_df = summarize_three_putt_by_bucket(round_data)
-    render_putting_distance_line_chart(three_putt_bucket_df, PUTT_BUCKET_ORDER, title="Attempts by Distance + 3-Putt %", value_col="Pct", made_col="Made", attempts_col="Attempts", value_label="3-Putt %", good_metric=False)
-    if putt_overlay_mode != "None" and overlay_label:
-        overlay_three_df = summarize_three_putt_by_bucket(overlay_frame)
-        render_putting_overlay_line_chart(three_putt_bucket_df, overlay_three_df, PUTT_BUCKET_ORDER, title="3-Putt % Overlay", value_col="Pct", primary_name="This Round", overlay_name=overlay_label)
 
     render_trivia_block("putting", "Putting tab trivia")
 
